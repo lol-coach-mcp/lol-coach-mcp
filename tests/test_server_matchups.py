@@ -467,3 +467,20 @@ async def test_build_no_games_tier_basis_not_claimed(store):
     sc = r.structured_content
     assert sc["games"] == 0 and sc["tier_basis"] == "비교 없음"
     assert "전체 티어" not in r.content[0].text
+
+
+def test_split_items_boots_upgrade_and_starters():
+    items = {
+        3006: {"name": "광전사의 군화", "tags": ["Boots"], "into": [3172], "from": [1001]},
+        3172: {"name": "건메탈 군화", "tags": ["AttackSpeed"], "into": [], "from": [3006]},  # 태그 없음
+        9999: {"name": "신발 업그레이드(가상)", "tags": [], "into": [], "from": [3006]},
+        1086: {"name": "도란의 활", "tags": ["Lane", "Damage"], "into": []},
+        1083: {"name": "수확의 낫", "tags": ["Lane", "Damage"], "into": []},
+        1101: {"name": "새끼 화염발톱", "tags": ["Jungle"], "into": []},
+        3031: {"name": "무한의 대검", "tags": ["Damage"], "into": []},
+    }
+    me = {"item0": 3172, "item1": 9999, "item2": 1086, "item3": 1083, "item4": 1101, "item5": 3031}
+    assert builds.split_items(me, items) == ((3031,), (3172, 9999))
+    # Data Dragon 정보가 없어도 상수 목록으로 건메탈 군화를 신발로 분류
+    assert 3172 in builds.BOOTS_EXTRA_IDS
+    assert builds.split_items({"item0": 3172, "item1": 3031}, {3031: items[3031]}) == ((3031,), (3172,))

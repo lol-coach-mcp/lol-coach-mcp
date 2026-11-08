@@ -23,6 +23,7 @@ ITEM_JSON = {
     "type": "item", "version": "16.22.1",
     "data": {
         "3006": {"name": "광전사의 군화", "gold": {"total": 1100}, "tags": ["Boots"], "into": ["3172"],
+                 "from": ["1001"],
                  "description": "<mainText>긴 설명</mainText>"},
         "6672": {"name": "크라켄 학살자", "gold": {"total": 3000}, "tags": ["Damage"]},
     },
@@ -129,8 +130,8 @@ async def test_items_and_runes(store, http, clock):
     respx.get(_cdn("16.22.1", "runesReforged")).respond(json=RUNES_JSON)
     dd = DataDragon(store, http, user_agent=UA, now=clock)
     items = await dd.items()
-    assert items[3006] == {"name": "광전사의 군화", "gold": 1100, "tags": ["Boots"], "into": [3172]}
-    assert items[6672]["into"] == []
+    assert items[3006] == {"name": "광전사의 군화", "gold": 1100, "tags": ["Boots"], "into": [3172], "from": [1001]}
+    assert items[6672]["into"] == [] and items[6672]["from"] == []
     assert items[6672]["name"] == "크라켄 학살자"
     runes = await dd.runes()
     assert runes[8000] == {"name": "정밀", "key": "Precision", "tree": "정밀"}

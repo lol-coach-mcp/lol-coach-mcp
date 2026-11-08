@@ -134,16 +134,17 @@ class DataDragon:
         return await self._data("champion", transform)
 
     async def items(self) -> dict[int, dict]:
-        """아이템 id → {name, gold(총액), tags, into(이 아이템으로 만들어지는 아이템 id 목록)}."""
+        """아이템 id → {name, gold(총액), tags, into(상위 아이템 id), from(재료 id)}."""
         def transform(raw: dict) -> dict:
             return {
                 item_id: {"name": it.get("name", ""),
                           "gold": (it.get("gold") or {}).get("total"),
                           "tags": list(it.get("tags", [])),
-                          "into": [int(i) for i in it.get("into", [])]}
+                          "into": [int(i) for i in it.get("into", [])],
+                          "from": [int(i) for i in it.get("from", [])]}
                 for item_id, it in raw["data"].items()
             }
-        got = await self._data("item", transform, cache_name="item2")
+        got = await self._data("item", transform, cache_name="item3")
         return {int(k): v for k, v in got.items()}
 
     async def runes(self) -> dict[int, dict]:

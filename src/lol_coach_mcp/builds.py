@@ -13,6 +13,12 @@ EXCLUDED_TAGS = ("Consumable", "Trinket")
 BOOTS_TAG = "Boots"
 # 서포터 퀘스트 아이템(월드 아틀라스 계열, Data Dragon 16.22 item.json 확인: 태그로 구분할 수 없음)
 SUPPORT_QUEST_IDS = frozenset({3865, 3866, 3867, 3869, 3870, 3871, 3876, 3877})
+# 건메탈 군화(3172)는 Boots 태그가 없고 into가 비어 있음(16.22.1 확인). from 검사의 안전장치
+BOOTS_EXTRA_IDS = frozenset({3172})
+# 시작·정글 아이템. "Lane" 태그(도란 계열·수확의 낫·서폿 시작 아이템 등)로 대부분 걸러지고,
+# 태그가 없는 흑요석 검(1040)·정글 새끼 펫(1101~1107)은 id로 제외
+STARTER_TAG = "Lane"
+STARTER_EXTRA_IDS = frozenset({1040, 1101, 1102, 1103, 1105, 1106, 1107})
 ITEM_LIMIT = 10  # 아이템별 통계 표시 수
 
 # 소환사 주문 id → 이름 (Data Dragon summoner.json을 쓰지 않으므로 상수)
@@ -31,23 +37,32 @@ def participant(match: dict | None, puuid: str) -> dict | None:
     return next((p for p in ps if p.get("puuid") == puuid), None)
 
 
+def is_boots(iid: int, info: dict, items: dict[int, dict]) -> bool:
+    """Boots 태그, 또는 재료(from) 중 Boots 태그 아이템이 있는 상위 신발(건메탈 군화 등)."""
+    if iid in BOOTS_EXTRA_IDS or BOOTS_TAG in info.get("tags", []):
+        return True
+    return any(BOOTS_TAG in (items.get(f) or {}).get("tags", []) for f in info.get("from") or [])
+
+
 def split_items(p: dict, items: dict[int, dict]) -> tuple[tuple[int, ...], tuple[int, ...]]:
     """최종 아이템(item0~5) → (완성 아이템 id, 신발 id), id 오름차순.
 
-    제외: 소모품·장신구, 서포터 퀘스트 아이템, 재료(Data Dragon `into`가 비어 있지 않음).
-    신발은 태그로 먼저 구분한다(신발도 상위 신발의 재료이므로).
+    제외: 소모품·장신구, 서포터 퀘스트·시작·정글 펫 아이템, 재료(Data Dragon `into`가 비어 있지 않음).
+    신발은 먼저 구분한다(신발도 상위 신발의 재료이므로).
     """
     core, boots = set(), set()
     for slot in ITEM_SLOTS:
         iid = p.get(slot) or 0
-        if not iid or iid in SUPPORT_QUEST_IDS:
+        if not iid or iid in SUPPORT_QUEST_IDS or iid in STARTER_EXTRA_IDS:
             continue
         info = items.get(iid) or {}
         tags = info.get("tags", [])
         if any(t in tags for t in EXCLUDED_TAGS):
             continue
-        if BOOTS_TAG in tags:
+        if is_boots(iid, info, items):
             boots.add(iid)
+        elif STARTER_TAG in tags:
+            continue
         elif not info.get("into"):
             core.add(iid)
     return tuple(sorted(core)), tuple(sorted(boots))
