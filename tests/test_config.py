@@ -19,3 +19,9 @@ def test_reads_dotenv_file(tmp_path):
     p = tmp_path / ".env"
     p.write_text("RIOT_API_KEY=RGAPI-file\n", encoding="utf-8")
     assert load_settings(env={}, dotenv_path=p).riot_api_key == "RGAPI-file"
+
+
+def test_repr_hides_api_key(tmp_path):
+    s = load_settings(env={"RIOT_API_KEY": "RGAPI-secret", "LOL_COACH_DATA_DIR": str(tmp_path)}, dotenv_path=tmp_path / "none.env")
+    assert "RGAPI-secret" not in repr(s)
+    assert s.riot_api_key == "RGAPI-secret"

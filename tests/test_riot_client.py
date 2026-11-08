@@ -187,3 +187,28 @@ async def test_live_account_lookup():
     async with RiotClient(s) as c:
         acc = await c.get_account_by_riot_id("위험한자식김준현", "KR1")
     assert "puuid" in acc
+
+
+@respx.mock
+async def test_429_exhausted_pauses_limiter_before_raising(client):
+    respx.get(f"{ASIA}/lol/match/v5/matches/KR_1").respond(429, headers={"Retry-After": "7"})
+    with pytest.raises(RiotRateLimited):
+        await client.get_match("KR_1")
+    assert client._limiters.for_host(ASIA)._paused_until >= 7
+
+
+@respx.mock
+async def test_retry_after_clamped_to_300(client, ft):
+    respx.get(f"{ASIA}/lol/match/v5/matches/KR_1").respond(429, headers={"Retry-After": "99999"})
+    with pytest.raises(RiotRateLimited):
+        await client.get_match("KR_1")
+    assert client._limiters.for_host(ASIA)._paused_until <= ft.now + 300
+    assert max(ft.sleeps) <= 300
+
+
+@respx.mock
+async def test_negative_retry_after_clamped_to_zero(client, ft):
+    respx.get(f"{ASIA}/lol/match/v5/matches/KR_1").respond(429, headers={"Retry-After": "-50"})
+    with pytest.raises(RiotRateLimited):
+        await client.get_match("KR_1")
+    assert client._limiters.for_host(ASIA)._paused_until <= ft.now + 0.001

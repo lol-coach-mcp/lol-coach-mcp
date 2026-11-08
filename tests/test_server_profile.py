@@ -199,3 +199,64 @@ async def test_changing_account_clears_previous_data(store):
     assert store.get_meta("last_sync_at") is None
     assert store.get_profile().puuid == "puuid-other"
     assert store.get_profile().tone == "격려"
+
+
+async def test_forget_then_other_account_leaves_no_old_data(store):
+    async with Client(make_server(store)) as c:
+        await c.call_tool("my_profile", {"action": "set", "riot_id": RIOT_ID})
+        await c.call_tool("sync_matches", {})
+        await c.call_tool("my_profile", {"action": "forget"})
+        assert len(store.list_my_stats(queue=None, include_remakes=True)) == 3
+        r = await c.call_tool("my_profile", {"action": "set", "riot_id": "다른사람#KR1"})
+        ctx = await c.call_tool("get_coach_context", {})
+    assert not r.is_error
+    assert store.list_my_stats(queue=None, include_remakes=True) == []
+    assert ctx.structured_content["stored_matches"] == 0
+
+
+async def test_forget_then_same_account_keeps_data(store):
+    async with Client(make_server(store)) as c:
+        await c.call_tool("my_profile", {"action": "set", "riot_id": RIOT_ID})
+        await c.call_tool("sync_matches", {})
+        await c.call_tool("my_profile", {"action": "forget"})
+        await c.call_tool("my_profile", {"action": "set", "riot_id": RIOT_ID})
+    assert len(store.list_my_stats(queue=None, include_remakes=True)) == 3
+
+
+async def test_forget_without_matches_keeps_owner_but_with_matches_clears(store):
+    store.set_meta("data_owner_puuid", "p")
+    store.set_meta("last_sync_at", "x")
+    store.forget_all(False)
+    assert store.get_meta("data_owner_puuid") == "p"
+    assert store.get_meta("last_sync_at") is None
+    store.forget_all(True)
+    assert store.get_meta("data_owner_puuid") is None
+
+
+async def test_instructions_include_riot_disclaimer(store):
+    server = make_server(store)
+    assert "not endorsed by Riot Games" in server.instructions
+    assert "Riot Games, Inc." in server.instructions
+
+
+async def test_set_unknown_riot_id_friendly_message(store):
+    from lol_coach_mcp.riot.errors import RiotNotFound
+
+    class NF(FakeRiot):
+        async def get_account_by_riot_id(self, game_name, tag_line):
+            raise RiotNotFound("Riot API에서 대상을 찾을 수 없음: /riot/account/v1/x")
+
+    async with Client(make_server(store, NF())) as c:
+        r = await c.call_tool("my_profile", {"action": "set", "riot_id": RIOT_ID})
+    assert r.is_error
+    text = r.content[0].text
+    assert "해당 Riot ID를 찾을 수 없음. 이름과 태그를 확인해야 함." == text
+    assert "/riot/" not in text
+
+
+async def test_sync_count_clamped_to_one(store):
+    async with Client(make_server(store)) as c:
+        await c.call_tool("my_profile", {"action": "set", "riot_id": RIOT_ID})
+        r = await c.call_tool("sync_matches", {"count": 0})
+    assert not r.is_error
+    assert r.structured_content["new_matches"] == 1

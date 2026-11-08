@@ -19,6 +19,11 @@ from .errors import (
 )
 
 DEFAULT_LIMITS = [(20, 1), (100, 120)]
+MAX_WAIT = 300.0
+
+
+def _clamp_wait(seconds: float) -> float:
+    return max(0.0, min(MAX_WAIT, seconds))
 
 
 def _q(part: str) -> str:
@@ -70,18 +75,19 @@ class RiotClient:
                 raise RiotNotFound(f"Riot API에서 대상을 찾을 수 없음: {path}")
             last = attempt >= self._max_retries
             if status == 429:
-                if last:
-                    raise RiotRateLimited("Riot API 호출 한도 초과. 재시도 횟수를 모두 소진함.")
                 try:
                     wait = float(resp.headers["Retry-After"])
                 except (KeyError, ValueError):
                     wait = float(2**attempt)
+                wait = _clamp_wait(wait)
                 await limiter.pause(wait)
+                if last:
+                    raise RiotRateLimited("Riot API 호출 한도 초과. 재시도 횟수를 모두 소진함.")
                 continue
             if status >= 500:
                 if last:
                     raise RiotServerError(f"Riot API 서버 오류({status}). 재시도 횟수를 모두 소진함.")
-                await self._sleep(float(2**attempt))
+                await self._sleep(_clamp_wait(float(2**attempt)))
                 continue
             raise RiotError(f"Riot API 예상치 못한 응답 코드: {status}")
         raise RiotError("Riot API 요청 실패")  # pragma: no cover
