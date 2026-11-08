@@ -118,3 +118,54 @@ def test_reopen_persists(tmp_path):
         assert s2.get_profile() == p
     finally:
         s2.close()
+
+
+BASE_ROW = {"tier": "GOLD", "position": "MIDDLE", "metric": "kda", "mean": 2.8, "std": 1.4,
+            "n": 500, "patch": "16.22", "collected_at": "2026-11-01", "source": "배포 기준선"}
+
+
+def test_baselines_roundtrip(store):
+    assert store.get_baseline("GOLD", "MIDDLE", "kda") is None
+    store.upsert_baselines([BASE_ROW, {**BASE_ROW, "champion": "Ahri", "mean": 3.1, "n": 40}])
+    got = store.get_baseline("GOLD", "MIDDLE", "kda")
+    assert got == {"mean": 2.8, "std": 1.4, "n": 500, "patch": "16.22",
+                   "collected_at": "2026-11-01", "source": "배포 기준선"}
+    assert store.get_baseline("GOLD", "MIDDLE", "kda", champion="Ahri")["mean"] == 3.1
+    assert store.get_baseline("GOLD", "TOP", "kda") is None
+    store.upsert_baselines([{**BASE_ROW, "mean": 2.9, "std": None}])
+    got = store.get_baseline("GOLD", "MIDDLE", "kda")
+    assert got["mean"] == 2.9 and got["std"] is None
+    store.forget_all(include_matches=True)
+    assert store.get_baseline("GOLD", "MIDDLE", "kda") is not None
+
+
+def test_migrates_v1_db_in_place(tmp_path):
+    import sqlite3
+
+    from lol_coach_mcp import store as store_mod
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(store_mod._SCHEMA_V1)
+    conn.execute("PRAGMA user_version = 1")
+    conn.execute(
+        "INSERT INTO profile (id, puuid, game_name, tag_line, tone, detail_level, registered_at) "
+        "VALUES (1, 'p1', 'a', 'b', '격려', '보통', 't')"
+    )
+    conn.commit()
+    assert conn.execute(
+        "SELECT name FROM sqlite_master WHERE name = 'baselines'").fetchone() is None
+    conn.close()
+
+    s = Store(path)
+    try:
+        assert s.get_profile().puuid == "p1"
+        s.upsert_baselines([BASE_ROW])
+        assert s.get_baseline("GOLD", "MIDDLE", "kda")["n"] == 500
+    finally:
+        s.close()
+    conn = sqlite3.connect(str(path))
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == store_mod.SCHEMA_VERSION == 2
+    finally:
+        conn.close()

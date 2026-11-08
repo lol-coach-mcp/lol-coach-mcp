@@ -10,12 +10,12 @@ from typing import Any
 
 from lol_coach_mcp.stats import MatchStats
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 TONES = ("직설", "격려", "데이터만")
 DETAIL_LEVELS = ("초보", "보통", "숙련")
 
-_SCHEMA = """
+_SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS profile (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     puuid TEXT NOT NULL,
@@ -56,6 +56,26 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 """
 
+# champion은 '' 이면 "챔피언 무관"(PK가 NULL을 허용하지 않도록)
+_SCHEMA_V2 = """
+CREATE TABLE IF NOT EXISTS baselines (
+    tier TEXT NOT NULL,
+    position TEXT NOT NULL,
+    champion TEXT NOT NULL DEFAULT '',
+    metric TEXT NOT NULL,
+    mean REAL NOT NULL,
+    std REAL,
+    n INTEGER,
+    patch TEXT,
+    collected_at TEXT,
+    source TEXT,
+    PRIMARY KEY (tier, position, champion, metric)
+);
+"""
+
+# (도달 버전, 스크립트) — 낮은 버전부터 차례로 적용
+_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2))
+
 
 @dataclass
 class Profile:
@@ -80,10 +100,12 @@ class Store:
         self._conn = sqlite3.connect(str(db_path))
         self._conn.row_factory = sqlite3.Row
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-        if version < SCHEMA_VERSION:
-            with self._conn:
-                self._conn.executescript(_SCHEMA)
-                self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        for target, script in _MIGRATIONS:
+            if version < target:
+                with self._conn:
+                    self._conn.executescript(script)
+                    self._conn.execute(f"PRAGMA user_version = {target}")
+                version = target
 
     def close(self) -> None:
         self._conn.close()
@@ -188,6 +210,30 @@ class Store:
             "SELECT taken_at, data FROM rank_snapshots ORDER BY taken_at DESC, id DESC LIMIT 1"
         ).fetchone()
         return (row["taken_at"], json.loads(row["data"])) if row else None
+
+    # 기준선
+    def get_baseline(
+        self, tier: str, position: str, metric: str, champion: str | None = None
+    ) -> dict | None:
+        row = self._conn.execute(
+            "SELECT mean, std, n, patch, collected_at, source FROM baselines "
+            "WHERE tier = ? AND position = ? AND champion = ? AND metric = ?",
+            (tier, position, champion or "", metric),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_baselines(self, rows: list[dict]) -> None:
+        with self._conn:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO baselines (tier, position, champion, metric, mean, std, "
+                "n, patch, collected_at, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (r["tier"], r["position"], r.get("champion") or "", r["metric"], r["mean"],
+                     r.get("std"), r.get("n"), r.get("patch"), r.get("collected_at"),
+                     r.get("source"))
+                    for r in rows
+                ],
+            )
 
     # 메타
     def get_meta(self, key: str) -> str | None:
