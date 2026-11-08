@@ -33,7 +33,7 @@ dl.kv{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;margin:0}
 dl.kv dt{color:var(--muted)}dl.kv dd{margin:0}
 .empty-state{color:var(--muted);padding:12px;border:1px dashed var(--border);border-radius:8px}
 svg{max-width:100%;height:auto;display:block}
-svg text{fill:var(--fg);font-size:11px}
+svg text{fill:var(--fg);font-size:14px;paint-order:stroke;stroke:var(--bg);stroke-width:3px;stroke-linejoin:round}
 svg .axis,svg .grid-line{stroke:var(--grid);stroke-width:1}
 svg .zero-line{stroke:var(--muted);stroke-dasharray:4 3;stroke-width:1}
 svg .map-bg{fill:var(--map)}
@@ -44,16 +44,24 @@ svg .result-remake{fill:var(--remake)}
 svg polyline.s0{stroke:var(--accent)}svg polyline.s1{stroke:var(--win)}
 svg polyline.s2{stroke:var(--loss)}svg polyline.s3{stroke:var(--muted)}
 svg polyline{fill:none;stroke-width:2}
+svg .marker-s0,svg .legend-s0{fill:var(--accent)}svg .marker-s1,svg .legend-s1{fill:var(--win)}
+svg .marker-s2,svg .legend-s2{fill:var(--loss)}svg .marker-s3,svg .legend-s3{fill:var(--muted)}
 footer{margin:24px 0 8px}
 @media (max-width:600px){main{padding:8px}section{padding:12px}table{font-size:.85rem}}
 """
 
 
-def empty_state(message: str) -> str:
-    return f'<p class="empty-state">{escape(str(message))}</p>'
+class SafeHtml(str):
+    """이미 이스케이프된 HTML 조각 표식. 일반 str은 render_page에서 이스케이프됨."""
+
+    __slots__ = ()
 
 
-def table(headers: Sequence[Any], rows: Iterable[Sequence[Any]]) -> str:
+def empty_state(message: str) -> SafeHtml:
+    return SafeHtml(f'<p class="empty-state">{escape(str(message))}</p>')
+
+
+def table(headers: Sequence[Any], rows: Iterable[Sequence[Any]]) -> SafeHtml:
     rows = list(rows)
     if not rows:
         return empty_state("표시할 데이터 없음")
@@ -62,17 +70,17 @@ def table(headers: Sequence[Any], rows: Iterable[Sequence[Any]]) -> str:
         "<tr>" + "".join(f"<td>{escape(str(c))}</td>" for c in row) + "</tr>"
         for row in rows
     )
-    return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+    return SafeHtml(f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>")
 
 
-def kv_list(pairs: Iterable[tuple[Any, Any]]) -> str:
+def kv_list(pairs: Iterable[tuple[Any, Any]]) -> SafeHtml:
     pairs = list(pairs)
     if not pairs:
         return empty_state("표시할 데이터 없음")
     items = "".join(
         f"<dt>{escape(str(k))}</dt><dd>{escape(str(v))}</dd>" for k, v in pairs
     )
-    return f'<dl class="kv">{items}</dl>'
+    return SafeHtml(f'<dl class="kv">{items}</dl>')
 
 
 def render_page(
@@ -81,9 +89,11 @@ def render_page(
     generated_at_kst: str,
     notes: Sequence[str] = (),
 ) -> str:
-    """sections의 html은 호출자가 이미 이스케이프한(table/svg 등) 조각이어야 함."""
+    """sections의 html이 SafeHtml이면 그대로, 일반 str이면 이스케이프."""
     secs = "".join(
-        f"<section><h2>{escape(str(s['heading']))}</h2>{s['html']}</section>"
+        f"<section><h2>{escape(str(s['heading']))}</h2>"
+        f"{s['html'] if isinstance(s['html'], SafeHtml) else escape(str(s['html']))}"
+        "</section>"
         for s in sections
     )
     note_html = ""

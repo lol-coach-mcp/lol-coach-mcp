@@ -96,9 +96,88 @@ def test_no_external_urls():
         [
             {"heading": "h", "html": svg.line_chart([{"label": "a", "points": [(0, 1), (1, 2)]}])},
             {"heading": "m", "html": svg.scatter_on_image([{"x": 1, "y": 1, "label": "x"}], "data:image/png;base64,AAAA", 300)},
-            {"heading": "b", "html": svg.bar_chart([("a", 1)]) + svg.result_strip(["승"])},
+            {"heading": "b", "html": render.SafeHtml(svg.bar_chart([("a", 1)]) + svg.result_strip(["승"]))},
         ],
         "now",
         [],
     )
     assert "http" not in page.replace(DISCLAIMER, "")
+
+
+QUOTE = '" onload="x'
+
+
+def test_plain_str_section_is_escaped_and_safehtml_passes():
+    page = render.render_page("t", [{"heading": "h", "html": XSS}], "n")
+    assert "<script>" not in page
+    page2 = render.render_page("t", [{"heading": "h", "html": render.SafeHtml("<b>ok</b>")}], "n")
+    assert "<b>ok</b>" in page2
+    for out in (render.table(["a"], [["x"]]), render.kv_list([("a", "b")]),
+                render.empty_state("x"), svg.line_chart([]), svg.bar_chart([("a", 1)]),
+                svg.scatter_on_image([], None), svg.result_strip(["승"])):
+        assert isinstance(out, render.SafeHtml)
+
+
+def test_quote_breakout_escaped():
+    outs = [
+        svg.line_chart([{"label": QUOTE, "points": [(0, 1), (1, 2)]}], x_label=QUOTE, y_label=QUOTE),
+        svg.bar_chart([(QUOTE, 1)], y_label=QUOTE),
+        svg.scatter_on_image([{"x": 1, "y": 1, "label": QUOTE}], QUOTE, 300),
+        svg.result_strip([QUOTE]),
+        render.table([QUOTE], [[QUOTE]]),
+        render.kv_list([(QUOTE, QUOTE)]),
+        render.render_page(QUOTE, [{"heading": QUOTE, "html": ""}], QUOTE, [QUOTE]),
+    ]
+    for o in outs:
+        assert '" onload="' not in o
+        assert "&quot; onload=&quot;x" in o
+
+
+def test_single_point_has_marker():
+    out = svg.line_chart([{"label": "a", "points": [(3, 5)]}])
+    assert "<circle" in out and "marker-s0" in out
+
+
+def test_all_equal_values():
+    out = svg.line_chart([{"label": "a", "points": [(0, 5), (1, 5), (2, 5)]}], y_zero_line=True)
+    assert "<polyline" in out and "nan" not in out.lower()
+    assert svg.bar_chart([("a", 2), ("b", 2)]).count("<rect") == 2
+
+
+def test_negative_values():
+    out = svg.line_chart([{"label": "a", "points": [(0, -5), (1, -2)]}], y_zero_line=True)
+    assert "zero-line" in out
+    bar = svg.bar_chart([("a", -4), ("b", 4)], height=280)
+    import re
+    rects = re.findall(r'<rect class="bar" x="[\d.]+" y="([\d.]+)" width="[\d.]+" height="([\d.]+)"', bar)
+    assert len(rects) == 2
+    (ya, ha), (yb, hb) = rects
+    assert float(ha) > 0 and float(hb) > 0
+    assert float(ya) == float(yb) + float(hb)  # negative bar starts at baseline
+
+
+def test_legend_swatches_wrap_without_overlap():
+    series = [{"label": "긴 라벨 " * 4 + str(i), "points": [(0, i), (1, i + 1)]} for i in range(4)]
+    out = svg.line_chart(series, width=400)
+    for i in range(4):
+        assert f"legend-s{i}" in out
+    import re
+    ys = set(re.findall(r'<rect class="legend-s\d" x="[\d.]+" y="([\d.]+)"', out))
+    assert len(ys) > 1  # wrapped to several rows
+
+
+def test_y_label_not_at_tick_row():
+    import re
+    out = svg.line_chart([{"label": "a", "points": [(0, 1), (1, 2)]}], y_label="골드")
+    ylab = re.search(r'<text x="[\d.]+" y="([\d.]+)"[^>]*>골드', out).group(1)
+    tick = re.search(r'<text x="[\d.]+" y="([\d.]+)" text-anchor="end">2\.0', out).group(1)
+    assert float(tick) - float(ylab) >= 12
+
+
+def test_labels_and_aria():
+    out = svg.scatter_on_image([{"x": 14870, "y": 0, "label": "10:00 사망"}], None, 300)
+    assert 'text-anchor="end"' in out  # clamped at right edge
+    assert 'aria-label="지도"' in out
+    assert 'aria-label="경기 결과"' in svg.result_strip(["승"])
+    assert "aria-label" not in svg.line_chart([{"label": "a", "points": [(0, 1)]}])
+    assert 'viewBox="0 0 300 300"' in svg.scatter_on_image([], None, 300.0)
