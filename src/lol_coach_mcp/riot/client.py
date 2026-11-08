@@ -18,6 +18,11 @@ from .errors import (
     RiotServerError,
 )
 
+APEX_LEAGUE_PATHS = {
+    "MASTER": "masterleagues",
+    "GRANDMASTER": "grandmasterleagues",
+    "CHALLENGER": "challengerleagues",
+}
 DEFAULT_LIMITS = [(20, 1), (100, 120)]
 MAX_WAIT = 300.0
 
@@ -122,6 +127,23 @@ class RiotClient:
 
     async def get_league_entries(self, puuid: str) -> list[dict]:
         return await self._get(self._kr, f"/lol/league/v4/entries/by-puuid/{_q(puuid)}")
+
+    async def get_league_entries_page(
+        self, queue: str, tier: str, division: str, page: int
+    ) -> list[dict]:
+        """IRON~DIAMOND 구간의 리그 항목 한 페이지(항목에 puuid 포함)."""
+        return await self._get(
+            self._kr,
+            f"/lol/league/v4/entries/{_q(queue)}/{_q(tier)}/{_q(division)}",
+            {"page": page},
+        )
+
+    async def get_apex_league(self, tier: str, queue: str) -> dict:
+        """MASTER/GRANDMASTER/CHALLENGER 리그 전체({"entries": [...]})."""
+        segment = APEX_LEAGUE_PATHS.get(tier)
+        if segment is None:
+            raise ValueError(f"상위 리그 티어가 아님: {tier}")
+        return await self._get(self._kr, f"/lol/league/v4/{segment}/by-queue/{_q(queue)}")
 
     async def get_summoner(self, puuid: str) -> dict:
         return await self._get(self._kr, f"/lol/summoner/v4/summoners/by-puuid/{_q(puuid)}")

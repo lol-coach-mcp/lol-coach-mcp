@@ -212,3 +212,28 @@ async def test_negative_retry_after_clamped_to_zero(client, ft):
     with pytest.raises(RiotRateLimited):
         await client.get_match("KR_1")
     assert client._limiters.for_host(ASIA)._paused_until <= ft.now + 0.001
+
+
+@respx.mock
+async def test_league_entries_page_path_and_params(client):
+    route = respx.get(f"{KR}/lol/league/v4/entries/RANKED_SOLO_5x5/GOLD/II").respond(
+        json=[{"puuid": "p1"}])
+    got = await client.get_league_entries_page("RANKED_SOLO_5x5", "GOLD", "II", 3)
+    assert got == [{"puuid": "p1"}]
+    assert route.calls[0].request.url.params["page"] == "3"
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "tier,seg", [("MASTER", "masterleagues"), ("GRANDMASTER", "grandmasterleagues"),
+                 ("CHALLENGER", "challengerleagues")])
+async def test_apex_league_path(client, tier, seg):
+    route = respx.get(f"{KR}/lol/league/v4/{seg}/by-queue/RANKED_SOLO_5x5").respond(
+        json={"entries": []})
+    assert await client.get_apex_league(tier, "RANKED_SOLO_5x5") == {"entries": []}
+    assert route.called
+
+
+async def test_apex_league_rejects_non_apex_tier(client):
+    with pytest.raises(ValueError):
+        await client.get_apex_league("GOLD", "RANKED_SOLO_5x5")

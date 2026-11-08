@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 lol-coach-mcp = "lol_coach_mcp.__main__:main"
+lol-coach-baseline = "lol_coach_mcp.baseline.cli:main"
 
 [dependency-groups]
 dev = [

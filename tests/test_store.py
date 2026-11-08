@@ -170,7 +170,7 @@ def test_migrates_v1_db_in_place(tmp_path):
         s.close()
     conn = sqlite3.connect(str(path))
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == store_mod.SCHEMA_VERSION == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == store_mod.SCHEMA_VERSION == 5
     finally:
         conn.close()
 
@@ -205,7 +205,7 @@ def test_migrates_v2_db_in_place_adds_caches(tmp_path):
         s.close()
     conn = sqlite3.connect(str(path))
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
     finally:
         conn.close()
 
@@ -278,7 +278,7 @@ def test_migrates_v3_db_in_place_adds_memory_tables(tmp_path):
         s.close()
     conn = sqlite3.connect(str(path))
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
         names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"coach_findings", "goals", "journal"} <= names
     finally:
@@ -359,3 +359,29 @@ def test_list_rank_snapshots_since_and_order(store):
     assert got[0][1] == [{"tier": "GOLD", "leaguePoints": 5}]
     assert store.list_rank_snapshots() == got
     assert store.list_rank_snapshots(limit=2)[-1][0] == "2026-11-05T00:00:00+00:00"
+
+
+def test_migrates_v4_db_adds_baseline_tables(tmp_path):
+    import sqlite3
+
+    from lol_coach_mcp import store as store_mod
+
+    path = tmp_path / "v4.db"
+    conn = sqlite3.connect(str(path))
+    for script in (store_mod._SCHEMA_V1, store_mod._SCHEMA_V2, store_mod._SCHEMA_V3,
+                   store_mod._SCHEMA_V4):
+        conn.executescript(script)
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+    conn.close()
+
+    s = Store(path)
+    try:
+        assert s.baseline_sample_count() == 0
+        assert s.get_baseline_job("GOLD") is None
+        s.set_baseline_job("GOLD", {"status": "done"}, "t")
+        assert s.get_baseline_job("GOLD") == {"status": "done"}
+        s.forget_all(include_matches=True)  # 기준선 수집 진행은 개인 데이터가 아니라 유지
+        assert s.get_baseline_job("GOLD") == {"status": "done"}
+    finally:
+        s.close()

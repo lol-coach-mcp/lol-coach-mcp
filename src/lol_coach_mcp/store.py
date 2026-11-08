@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import secrets
 import sqlite3
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -10,7 +12,7 @@ from typing import Any
 
 from lol_coach_mcp.stats import MatchStats
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 TONES = ("직설", "격려", "데이터만")
 DETAIL_LEVELS = ("초보", "보통", "숙련")
@@ -124,13 +126,43 @@ CREATE TABLE IF NOT EXISTS journal (
 );
 """
 
+# 기준선 수집 진행·표본(개인 데이터 아님 → forget_all 대상 아님).
+# 표본에는 식별자를 넣지 않음. baseline_seen은 시드·매치 중복 제외용 솔트 해시만 보관하며 export 대상이 아님.
+BASELINE_METRIC_COLUMNS = (
+    "kda", "cs_per_min", "gold_per_min", "vision_per_min",
+    "damage_share", "kill_participation", "deaths", "win",
+)
+_SCHEMA_V5 = """
+CREATE TABLE IF NOT EXISTS baseline_jobs (
+    tier TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS baseline_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tier TEXT NOT NULL,
+    position TEXT NOT NULL,
+    champion TEXT,
+    kda REAL, cs_per_min REAL, gold_per_min REAL, vision_per_min REAL,
+    damage_share REAL, kill_participation REAL, deaths REAL, win REAL,
+    patch TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_baseline_samples_group ON baseline_samples (tier, position);
+CREATE TABLE IF NOT EXISTS baseline_seen (
+    kind TEXT NOT NULL,
+    key_hash TEXT NOT NULL,
+    tier TEXT NOT NULL,
+    PRIMARY KEY (kind, key_hash)
+);
+"""
+
 GOAL_STATUSES = ("진행 중", "달성", "미달", "종료")
 _GOAL_UPDATABLE = ("status", "closed_at", "target", "games_to_track")
 MEMORY_TABLES = ("coach_findings", "goals", "journal")
 
 # (도달 버전, 스크립트) — 낮은 버전부터 차례로 적용
 _MIGRATIONS = (
-    (1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4),
+    (1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4), (5, _SCHEMA_V5),
 )
 
 
@@ -327,6 +359,96 @@ class Store:
                     for r in rows
                 ],
             )
+
+    def list_baselines(self, source: str | None = None) -> list[dict]:
+        sql, params = "SELECT * FROM baselines", []
+        if source is not None:
+            sql += " WHERE source = ?"
+            params.append(source)
+        sql += " ORDER BY tier, position, champion, metric"
+        return [dict(r) for r in self._conn.execute(sql, params)]
+
+    def replace_baselines_by_source(self, source: str, rows: list[dict]) -> None:
+        """해당 출처의 기준선 행을 모두 지우고 rows로 교체(한 트랜잭션)."""
+        with self._conn:
+            self._conn.execute("DELETE FROM baselines WHERE source = ?", (source,))
+        self.upsert_baselines(rows)
+
+    # 기준선 수집 진행
+    def _baseline_salt(self) -> str:
+        salt = self.get_meta("baseline_salt")
+        if salt is None:
+            salt = secrets.token_hex(16)
+            self.set_meta("baseline_salt", salt)
+        return salt
+
+    def baseline_key_hash(self, kind: str, value: str) -> str:
+        return hashlib.sha256(f"{self._baseline_salt()}:{kind}:{value}".encode()).hexdigest()
+
+    def baseline_seen(self, kind: str, value: str) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM baseline_seen WHERE kind = ? AND key_hash = ?",
+            (kind, self.baseline_key_hash(kind, value)),
+        ).fetchone() is not None
+
+    def baseline_mark_seen(self, kind: str, value: str, tier: str) -> None:
+        h = self.baseline_key_hash(kind, value)
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO baseline_seen (kind, key_hash, tier) VALUES (?, ?, ?)",
+                (kind, h, tier),
+            )
+
+    def add_baseline_match(self, tier: str, match_id: str, samples: list[dict]) -> bool:
+        """매치 1건의 표본을 저장하고 매치를 처리됨으로 표시(원자적). 이미 처리된 매치면 False."""
+        h = self.baseline_key_hash("match", match_id)
+        cols = ("position", "champion", "patch", *BASELINE_METRIC_COLUMNS)
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO baseline_seen (kind, key_hash, tier) VALUES ('match', ?, ?)",
+                (h, tier),
+            )
+            if cur.rowcount == 0:
+                return False
+            self._conn.executemany(
+                f"INSERT INTO baseline_samples (tier, {', '.join(cols)}) "
+                f"VALUES (?, {', '.join('?' for _ in cols)})",
+                [(tier, *(sm.get(c) for c in cols)) for sm in samples],
+            )
+        return True
+
+    def baseline_match_count(self, tier: str) -> int:
+        return int(self._conn.execute(
+            "SELECT COUNT(*) FROM baseline_seen WHERE kind = 'match' AND tier = ?", (tier,)
+        ).fetchone()[0])
+
+    def baseline_sample_count(self, tier: str | None = None) -> int:
+        sql, params = "SELECT COUNT(*) FROM baseline_samples", []
+        if tier is not None:
+            sql += " WHERE tier = ?"
+            params.append(tier)
+        return int(self._conn.execute(sql, params).fetchone()[0])
+
+    def list_baseline_samples(self) -> list[dict]:
+        return [dict(r) for r in self._conn.execute("SELECT * FROM baseline_samples ORDER BY id")]
+
+    def get_baseline_job(self, tier: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT state FROM baseline_jobs WHERE tier = ?", (tier,)
+        ).fetchone()
+        return json.loads(row["state"]) if row else None
+
+    def set_baseline_job(self, tier: str, state: dict, updated_at: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO baseline_jobs (tier, state, updated_at) VALUES (?, ?, ?)",
+                (tier, _dumps(state), updated_at),
+            )
+
+    def reset_baseline_tier(self, tier: str) -> None:
+        with self._conn:
+            for t in ("baseline_jobs", "baseline_samples", "baseline_seen"):
+                self._conn.execute(f"DELETE FROM {t} WHERE tier = ?", (tier,))  # 고정 테이블명
 
     # 메타
     def get_meta(self, key: str) -> str | None:
