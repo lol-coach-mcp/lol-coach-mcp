@@ -153,3 +153,19 @@ async def test_full_skips_known_and_fetches_rest(store):
     assert r.stopped_reason == "no_more"
     assert len(c.match_calls) == 150
     assert r.total_stored == 250
+
+
+async def test_timeline_not_found_still_saves_match(store):
+    from lol_coach_mcp.riot.errors import RiotNotFound
+
+    class C(FakeClient):
+        async def get_timeline(self, match_id):
+            if match_id == "KR_2":
+                raise RiotNotFound("gone")
+            return await super().get_timeline(match_id)
+
+    r = await sync_matches(C(make_ids(3)), store, PUUID_ME)
+    assert r.new_matches == 3
+    assert store.has_match("KR_2")
+    assert store.get_timeline("KR_2") is None
+    assert store.get_timeline("KR_1") is not None
