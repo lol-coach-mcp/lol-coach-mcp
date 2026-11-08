@@ -204,7 +204,7 @@ class OpggClient:
             return None
         try:
             value = extract(parse_opgg(text))
-        except (OpggParseError, KeyError, TypeError, IndexError, ValueError) as e:
+        except (OpggParseError, KeyError, TypeError, IndexError, ValueError, RecursionError) as e:
             logger.warning("OP.GG %s 응답 해석 실패: %s: %s", tool, type(e).__name__, e)
             return None
         if value:  # 빈 결과([], {})는 일시적 상태일 수 있어 캐시하지 않음

@@ -353,11 +353,13 @@ async def test_open_browser_false_does_not_call_opener(store, tmp_path):
     assert opener.calls == [] and r.structured_content["opened"] is False
 
 
-def test_default_opener_is_webbrowser_open():
+def test_default_opener_is_platform_aware():
     import webbrowser
 
     st = AppState(settings=None, riot=None, store=None)
-    assert st.open_url is webbrowser.open
+    from lol_coach_mcp.server import default_open_url
+
+    assert st.open_url is default_open_url
 
 
 async def test_season_lp_line_uses_ladder_value_across_promotion(store, tmp_path):
@@ -372,7 +374,7 @@ async def test_season_lp_line_uses_ladder_value_across_promotion(store, tmp_path
         store.add_rank_snapshot(entry("PLATINUM", "IV", 12), (now + timedelta(days=2)).isoformat())
         r = await c.call_tool("open_dashboard", {"view": "season", "open_browser": False})
     html = _html(r.structured_content)
-    assert "래더 점수(LP 환산)" in html
+    assert "티어·LP 환산(표시용)" in html
     assert ">1612.0<" in html and ">1595.0<" in html  # 축 라벨에 환산값
     assert "PLATINUM IV" in html
 

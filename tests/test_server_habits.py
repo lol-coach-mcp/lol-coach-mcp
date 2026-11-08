@@ -105,6 +105,7 @@ async def test_few_timelines_is_insufficient_sample(store):
     assert sc["status"] == "판단 보류(표본 부족)" and sc["games_with_timeline"] == 4
 
 
-async def test_riot_error_becomes_tool_error(store):
+async def test_timeline_riot_error_degrades_instead_of_tool_error(store):
     r = await _run(store, TlRiot(n_matches=0, tl_error=RiotServerError(500)), n=5)
-    assert r.is_error
+    assert not r.is_error
+    assert any("타임라인이 없는 경기 5판 제외" in n for n in r.structured_content["notes"])

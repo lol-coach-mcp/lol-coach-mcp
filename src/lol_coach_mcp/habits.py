@@ -73,7 +73,8 @@ def _metrics(games: list[tuple[dict, dict]], puuid: str) -> dict:
             consec_games += 1
         for d in ds:
             bucket_counts[_bucket_index(d["ms"])] += 1
-            zones[d["zone"]] += 1
+            if d["zone"] != review.ZONE_UNKNOWN:  # 위치 없는 데스는 구역 집계에서 제외(총 데스에는 포함)
+                zones[d["zone"]] += 1
             if review.TAG_BEFORE_OBJECTIVE in d["tags"]:
                 pre_obj += 1
             if review.TAG_SOLO in d["tags"]:

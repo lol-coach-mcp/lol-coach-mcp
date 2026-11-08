@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 from lol_coach_mcp import analysis, champions
+from lol_coach_mcp.models import QUEUE_NAMES
 
 from . import svg
 from .render import SafeHtml, empty_state, kv_list, table
@@ -73,7 +74,7 @@ def overview_view(
     queue_text: str = "솔로랭크",
 ) -> list[Section]:
     pairs: list[tuple[str, str]] = [("계정", riot_id)]
-    names = {"RANKED_SOLO_5x5": "솔로랭크", "RANKED_FLEX_SR": "자유랭크"}
+    names = QUEUE_NAMES
     for e in rank_entries:
         if e.get("queueType") in names:
             wins, losses = e.get("wins", 0), e.get("losses", 0)
@@ -150,7 +151,7 @@ def season_view(
     if lp_rows:
         chart = svg.line_chart(
             [{"label": "솔로랭크 래더 환산", "points": [(r["days"], r["ladder"]) for r in lp_rows]}],
-            x_label="첫 스냅샷 이후 일수", y_label="래더 점수(LP 환산)",
+            x_label="첫 스냅샷 이후 일수", y_label="티어·LP 환산(표시용)",
         )
         recent = list(lp_rows)[-LP_TABLE_LIMIT:]
         note = kv_list([("안내", "티어·디비전·LP를 한 축으로 환산한 표시용 값이며 MMR 추정이 아님")])

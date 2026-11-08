@@ -5,6 +5,8 @@ import asyncio
 import json
 import base64
 import re
+import subprocess
+import sys
 import webbrowser
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -57,6 +59,7 @@ from lol_coach_mcp.models import (
     ReviewSummaryOut,
     SplitGroupOut,
     SplitsOut,
+    QUEUE_NAMES,
     SyncOut,
     VisionOut,
 )
@@ -81,7 +84,6 @@ RIOT_ID_FORMAT_ERROR = (
 )
 
 KST = timezone(timedelta(hours=9))
-QUEUE_NAMES = {"RANKED_SOLO_5x5": "솔로랭크", "RANKED_FLEX_SR": "자유랭크"}
 QUEUE_LABELS = {420: "솔로랭크", 440: "자유랭크"}
 PROFILE_QUEUE = 420
 MAX_HISTORY_COUNT = 50
@@ -101,7 +103,6 @@ ANALYSIS_MAX_COUNT = 100
 SPLITS_DEFAULT_COUNT = 30
 HABITS_DEFAULT_COUNT = 30
 HABITS_BACKFILL_LIMIT = 10
-NOTE_NO_RANK_INFO = "현재 티어를 확인하지 못함"
 SOLO_QUEUE_TYPE = "RANKED_SOLO_5x5"
 
 RIOT_DISCLAIMER = (
@@ -114,6 +115,21 @@ INSTRUCTIONS = f"롤 개인 코칭 서버. 대화 시작 시 get_coach_context �
 NOT_FOUND_MESSAGE = "해당 Riot ID를 찾을 수 없음. 이름과 태그를 확인해야 함."
 
 
+def default_open_url(url: str) -> bool:
+    """대시보드를 기본 프로그램으로 엶. 비 Windows는 열기 명령의 출력이 MCP 표준 출력에 섞이지 않게 막음."""
+    if sys.platform.startswith("win"):
+        return bool(webbrowser.open(url))
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    try:
+        subprocess.Popen(
+            [opener, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return False
+    return True
+
+
 @dataclass
 class AppState:
     settings: Settings
@@ -123,7 +139,7 @@ class AppState:
     ddragon: Any = None  # DataDragon 또는 가짜 객체. None이면 Data Dragon 데이터 없음
     http: Any = None  # 기본 팩토리가 만든 httpx.AsyncClient(종료 시 닫음)
     now: Callable[[], datetime] | None = None  # 시계 주입(테스트용). None이면 현재 시각
-    open_url: Callable[[str], bool] = webbrowser.open  # 대시보드를 여는 함수(테스트에서 대체)
+    open_url: Callable[[str], bool] = default_open_url  # 대시보드를 여는 함수(테스트에서 대체)
 
 
 def _default_state() -> AppState:
@@ -313,6 +329,14 @@ def _review_text(out: ReviewOut) -> str:
     return "\n".join(lines)
 
 
+async def _fetch_rank_entries(st: AppState, puuid: str) -> list[dict]:
+    """리그 항목 조회 → 솔로·자유랭크만 남김 → 랭크 스냅샷 저장. 조회 오류는 호출자가 처리함."""
+    fetched = await st.riot.get_league_entries(puuid)
+    entries = [e for e in fetched if e.get("queueType") in QUEUE_NAMES]
+    st.store.add_rank_snapshot(entries, datetime.now(timezone.utc).isoformat())
+    return entries
+
+
 async def _solo_tier(st: AppState, puuid: str) -> tuple[str | None, str | None]:
     """현재 솔로랭크 티어와, 티어가 없을 때의 안내 문구를 반환함."""
     snap = st.store.latest_rank_snapshot()
@@ -320,11 +344,9 @@ async def _solo_tier(st: AppState, puuid: str) -> tuple[str | None, str | None]:
     solo = next((e for e in entries if e.get("queueType") == SOLO_QUEUE_TYPE), None)
     if solo is None:
         try:
-            fetched = await st.riot.get_league_entries(puuid)
+            entries = await _fetch_rank_entries(st, puuid)
         except (RiotError, httpx.HTTPError):
             return None, form.NOTE_TIER_UNKNOWN
-        entries = [e for e in fetched if e.get("queueType") in QUEUE_NAMES]
-        st.store.add_rank_snapshot(entries, datetime.now(timezone.utc).isoformat())
         solo = next((e for e in entries if e.get("queueType") == SOLO_QUEUE_TYPE), None)
     if solo is None:
         return None, form.NOTE_UNRANKED
@@ -594,9 +616,17 @@ async def _ddragon_champions(st: AppState) -> dict | None:
     if st.ddragon is None:
         return None
     try:
-        return await st.ddragon.champions()
-    except httpx.HTTPError:
+        dd = await st.ddragon.champions()
+    except (httpx.HTTPError, ValueError):
         return None
+    # Match-V5 키(FiddleSticks)와 Data Dragon 키(Fiddlesticks)의 대소문자 차이를 별칭으로 메움
+    by_lower = {k.lower(): k for k in dd}
+    aliased = dict(dd)
+    for s in st.store.list_my_stats(queue=None, include_remakes=True):
+        src = by_lower.get(s.champion.lower())
+        if src is not None and s.champion not in aliased:
+            aliased[s.champion] = dd[src]
+    return aliased
 
 
 async def _opgg_analysis(
@@ -736,7 +766,7 @@ async def _ddragon_data(st: AppState, name: str) -> dict | None:
         return None
     try:
         return await getattr(st.ddragon, name)()
-    except httpx.HTTPError:
+    except (httpx.HTTPError, ValueError):
         return None
 
 
@@ -958,6 +988,16 @@ NOTE_DASH_NO_GOLD = "라인 상대를 특정하지 못했거나 15분 이전에 
 NOTE_DASH_NO_OPGG = "OP.GG 데이터를 불러오지 못해 내 기록만 표시함"
 
 
+async def _fetch_timeline(st: AppState, match_id: str) -> dict | None:
+    """Riot에서 타임라인을 받아 저장함. 어떤 Riot·네트워크 오류든 None으로 완화함."""
+    try:
+        timeline = await st.riot.get_timeline(match_id)
+    except (RiotError, httpx.HTTPError):
+        return None
+    st.store.save_timeline(match_id, timeline)
+    return timeline
+
+
 async def _timeline_for(
     st: AppState, p: Profile, match_id: str
 ) -> tuple[dict | None, list[str]]:
@@ -965,12 +1005,9 @@ async def _timeline_for(
     notes: list[str] = []
     timeline = st.store.get_timeline(match_id)
     if timeline is None:
-        try:
-            timeline = await st.riot.get_timeline(match_id)
-        except RiotNotFound:
+        timeline = await _fetch_timeline(st, match_id)
+        if timeline is None:
             notes.append(NO_TIMELINE_NOTE)
-        else:
-            st.store.save_timeline(match_id, timeline)
     if timeline is not None:
         try:
             review.participant_id(timeline, p.puuid)
@@ -1006,13 +1043,10 @@ def _parse_utc(iso: str) -> datetime | None:
 async def _dash_rank_entries(st: AppState, p: Profile) -> list[dict]:
     """최신 랭크 조회 후 스냅샷 저장. 실패하면 저장된 최신 스냅샷."""
     try:
-        fetched = await st.riot.get_league_entries(p.puuid)
+        return await _fetch_rank_entries(st, p.puuid)
     except (RiotError, httpx.HTTPError):
         snap = st.store.latest_rank_snapshot()
         return snap[1] if snap else []
-    entries = [e for e in fetched if e.get("queueType") in QUEUE_NAMES]
-    st.store.add_rank_snapshot(entries, datetime.now(timezone.utc).isoformat())
-    return entries
 
 
 def _dash_lp_rows(st: AppState, p: Profile) -> list[dict]:
@@ -1431,15 +1465,13 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         if p is None:
             return tool_error(NO_PROFILE_MESSAGE)
         try:
-            entries = await st.riot.get_league_entries(p.puuid)
+            entries = await _fetch_rank_entries(st, p.puuid)
             summoner = await st.riot.get_summoner(p.puuid)
             mastery = await st.riot.get_top_mastery(p.puuid, 3)
         except RiotError as e:
             return tool_error(str(e))
         except httpx.HTTPError:
             return tool_error(NETWORK_ERROR_MESSAGE)
-        entries = [e for e in entries if e.get("queueType") in QUEUE_NAMES]
-        st.store.add_rank_snapshot(entries, datetime.now(timezone.utc).isoformat())
         ranks = [
             RankOut(
                 queue=QUEUE_NAMES[e["queueType"]],
@@ -1451,7 +1483,6 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
                 win_rate=_win_rate(e["wins"], e["losses"]),
             )
             for e in entries
-            if e.get("queueType") in QUEUE_NAMES
         ]
         form = recent_form(st.store.list_my_stats(queue=PROFILE_QUEUE, limit=20))
         out = PlayerProfileOut(
@@ -1493,15 +1524,9 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         if p is None:
             return tool_error(NO_PROFILE_MESSAGE)
         count = max(1, min(count, MAX_HISTORY_COUNT))
-        notes: list[str] = []
-        try:
-            await run_sync(st.riot, st.store, p.puuid, queue=queue, limit=count, full=False)
-        except (RiotError, httpx.HTTPError) as e:
-            if not st.store.list_my_stats(queue=queue, limit=1, include_remakes=True):
-                if isinstance(e, RiotError):
-                    return tool_error(str(e))
-                return tool_error(NETWORK_ERROR_MESSAGE)
-            notes.append(SYNC_FAILED_NOTE)
+        notes = await _sync_for_analysis(st, p, queue, count)
+        if isinstance(notes, CallToolResult):
+            return notes
         stats = st.store.list_my_stats(queue=queue, limit=count, include_remakes=True)
         last_sync = st.store.get_meta("last_sync_at")
         rows = [
@@ -2002,21 +2027,10 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         if stats.is_remake:
             return done(entries=[entry], notes=["다시하기 경기라 대조할 근거를 만들지 않음"])
         match = st.store.get_match(mid) or {}
-        timeline = st.store.get_timeline(mid)
-        if timeline is None and match.get("info"):
-            try:
-                timeline = await st.riot.get_timeline(mid)
-            except (RiotError, httpx.HTTPError):
-                timeline = None
-            else:
-                st.store.save_timeline(mid, timeline)
-        if timeline is not None:
-            try:
-                review.participant_id(timeline, p.puuid)
-            except ValueError:
-                timeline = None
-        if timeline is None or not match.get("info"):
-            timeline = None
+        timeline = None
+        if match.get("info"):
+            timeline, _ = await _timeline_for(st, p, mid)
+        if timeline is None:
             notes.append(NO_TIMELINE_NOTE)
         evidence = journal_mod.build_evidence(entry["text"], stats, match, timeline, p.puuid)
         return done(entries=[entry], evidence=evidence, notes=notes)
@@ -2127,12 +2141,8 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             skipped_404 = 0
             for i, mid in enumerate(to_fetch):
                 await ctx.report_progress(i, len(to_fetch), f"타임라인 수집 {i + 1}/{len(to_fetch)}")
-                try:
-                    tl = await st.riot.get_timeline(mid)
-                except RiotNotFound:
+                if await _fetch_timeline(st, mid) is None:
                     skipped_404 += 1
-                    continue
-                st.store.save_timeline(mid, tl)
             if to_fetch:
                 await ctx.report_progress(len(to_fetch), len(to_fetch), "타임라인 수집 완료")
         except RiotError as e:
@@ -2414,7 +2424,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         champion: str,
         count: int = MATCHUP_DEFAULT_COUNT,
     ) -> Annotated[CallToolResult, BuildReportOut]:
-        """내 솔로랭크 최근 N판 중 지정 챔피언(한국어 이름 또는 영문 키) 판들의 빌드 리포트. 최종 아이템(item0~5, 신발·소모품·장신구 제외 핵심 아이템 조합), 신발, 핵심 룬(첫 번째 룬), 소환사 주문 조합별 판수·승률(조합 3판 미만은 판단 보류, 분류별 상위 5개)과, OP.GG의 같은 티어·포지션 추천 핵심 아이템·신발·룬·소환사 주문과 겹치는지(겹침 여부와 OP.GG 순위). 언랭이면 전체 티어 기준. Data Dragon이 없으면 아이템·룬 조합은 생략하고 소환사 주문만, OP.GG 실패 시 겹침 표시 없이 내 데이터만 반환. 매번 새 경기를 동기화하고 실패하면 저장된 데이터 기준."""
+        """내 솔로랭크 최근 N판 중 지정 챔피언(한국어 이름 또는 영문 키) 판들의 빌드 리포트. 최종 아이템(item0~5, 신발·소모품·장신구 제외)별 판수·승률(판수 상위 10개), 내 최종 아이템에 OP.GG 추천 핵심 아이템이 몇 개 들어 있는지(0개~전체)별 판수·승률, 신발·핵심 룬(첫 번째 룬)·소환사 주문 조합별 판수·승률(분류별 상위 5개). 3판 미만인 항목은 판단 보류. OP.GG의 같은 티어·포지션 추천 핵심 아이템·신발·룬·소환사 주문과 겹치는지(겹침 여부와 OP.GG 순위)도 표시함. 언랭이면 전체 티어 기준. Data Dragon이 없으면 아이템·룬 조합은 생략하고 소환사 주문만, OP.GG 실패 시 겹침 표시 없이 내 데이터만 반환. 매번 새 경기를 동기화하고 실패하면 저장된 데이터 기준."""
         st = _state(ctx)
         p = st.store.get_profile()
         if p is None:

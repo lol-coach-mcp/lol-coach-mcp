@@ -13,6 +13,7 @@ TOP_X_LIMIT = 3600
 TOP_Y_LIMIT = 11300
 BOT_X_LIMIT = 11300
 BOT_Y_LIMIT = 3600
+ZONE_UNKNOWN = "알 수 없음"
 ZONES = (
     "블루 본진",
     "레드 본진",
@@ -177,6 +178,7 @@ def death_points(timeline: dict, puuid: str) -> list[dict]:
     out = []
     for e in _my_death_events(timeline, pid):
         pos = e.get("position") or {}
+        has_pos = "x" in pos and "y" in pos
         if "x" not in pos or "y" not in pos:
             continue  # 위치 없는 데스는 (0,0)에 찍지 않고 제외
         out.append({"ms": int(e["timestamp"]), "time": mmss(e["timestamp"]),
@@ -210,12 +212,13 @@ def deaths(match: dict, timeline: dict, puuid: str) -> list[dict]:
         if solo:
             tags.append(TAG_SOLO)
         pos = e.get("position") or {}
+        has_pos = "x" in pos and "y" in pos
         result.append(
             {
                 "time": mmss(ms),
                 "ms": ms,
                 "phase": phase_of(ms),
-                "zone": zone_of(int(pos.get("x", 0)), int(pos.get("y", 0))),
+                "zone": zone_of(int(pos["x"]), int(pos["y"])) if has_pos else ZONE_UNKNOWN,
                 "killer_champion": killer,
                 "assists": assists,
                 "solo": solo,

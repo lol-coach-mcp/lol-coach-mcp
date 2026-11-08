@@ -41,9 +41,10 @@ def resolve_champion(
 ) -> str | None:
     """한국어 이름 또는 영문 키 → Data Dragon 챔피언 키. 못 찾으면 None."""
     q = _norm(query)
+    played = {_norm(k): k for k in played_keys}  # Match-V5 표기(FiddleSticks)가 Data Dragon(Fiddlesticks)보다 우선
     for key, info in (ddragon or {}).items():
         if _norm(key) == q or _norm(info.get("name", "")) == q:
-            return key
+            return played.get(_norm(key), key)
     for key in played_keys:  # Data Dragon 없이도 영문 키는 내 경기 기록으로 해석
         if _norm(key) == q:
             return key
