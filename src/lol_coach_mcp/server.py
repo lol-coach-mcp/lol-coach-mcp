@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -927,15 +928,26 @@ def _habits_text(out: HabitsOut) -> str:
     return "\n".join(lines)
 
 
+PROMPT_COMMON = (
+    "먼저 get_coach_context를 호출해 프로필의 말투(tone)와 상세 수준(detail_level) 설정을 확인하고, "
+    "그 말투와 상세 수준을 지켜 답변해야 함. 아래 순서대로 도구를 호출하고, "
+    "도구가 돌려준 수치와 표본 수 같은 근거에 기반해서만 조언해야 함."
+)
+
+
 def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPServer:
     factory = state_factory or _default_state
+    # 정적 리소스 핸들러는 Context를 받을 수 없으므로 lifespan 상태를 여기에 보관
+    live: dict[str, AppState] = {}
 
     @asynccontextmanager
     async def lifespan(server: MCPServer) -> AsyncIterator[AppState]:
         state = factory()
+        live["state"] = state
         try:
             yield state
         finally:
+            live.pop("state", None)
             aclose = getattr(state.riot, "aclose", None)
             if aclose is not None:
                 await aclose()
@@ -1024,16 +1036,12 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         except httpx.HTTPError:
             return tool_error(NETWORK_ERROR_MESSAGE)
 
-    @mcp.tool()
-    async def get_coach_context(ctx: Context) -> Annotated[CallToolResult, CoachContextOut]:
-        """코칭 대화 시작 시 호출. 프로필 설정, 마지막 동기화 시각, 저장된 경기 수를 반환함."""
-        st = _state(ctx)
+    def build_context(st: AppState) -> tuple[Profile, CoachContextOut] | None:
         p = st.store.get_profile()
         if p is None:
-            return tool_error(NO_PROFILE_MESSAGE)
+            return None
         last = st.store.get_meta("last_sync_at")
         all_stats = st.store.list_my_stats(queue=None, include_remakes=True)
-        stored = len(all_stats)
         now = _now_kst(st)
         major = memory.latest_major(all_stats)
         goals = st.store.list_goals(status="진행 중")
@@ -1043,11 +1051,79 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         ]
         journal = st.store.list_journal(memory.CONTEXT_JOURNAL)
         out = CoachContextOut(
-            profile=_profile_out(p), last_sync_at=last, stored_matches=stored,
+            profile=_profile_out(p), last_sync_at=last, stored_matches=len(all_stats),
             goals=goals, findings=findings, journal=journal,
         )
-        text = _context_text(p, out)
-        return tool_result(out, text)
+        return p, out
+
+    @mcp.tool()
+    async def get_coach_context(ctx: Context) -> Annotated[CallToolResult, CoachContextOut]:
+        """코칭 대화 시작 시 호출. 프로필 설정, 마지막 동기화 시각, 저장된 경기 수를 반환함."""
+        built = build_context(_state(ctx))
+        if built is None:
+            return tool_error(NO_PROFILE_MESSAGE)
+        p, out = built
+        return tool_result(out, _context_text(p, out))
+
+    @mcp.resource(
+        "coach://context", name="coach_context", mime_type="application/json",
+        description="get_coach_context와 같은 내용(프로필 설정, 진행 중 과제, 최근 판정 기록, 일지)",
+    )
+    async def context_resource() -> str:
+        built = build_context(live["state"])
+        if built is None:
+            data = {"registered": False, "guidance": NO_PROFILE_MESSAGE}
+        else:
+            data = {"registered": True, **built[1].model_dump(mode="json")}
+        return json.dumps(data, ensure_ascii=False)
+
+    @mcp.resource(
+        "coach://baselines", name="coach_baselines", mime_type="application/json",
+        description="저장된 티어 기준선의 출처, 패치, 수집일, 표본 요약",
+    )
+    async def baselines_resource() -> str:
+        summary = live["state"].store.baseline_summary()
+        return json.dumps(summary or {"status": "기준선 없음"}, ensure_ascii=False)
+
+    @mcp.prompt(name="match_review", description="방금 판 경기 복기")
+    def match_review(match_id: str = "") -> str:
+        target = f"match_id {match_id}" if match_id else "가장 최근 경기(match_id 생략)"
+        return (
+            f"{PROMPT_COMMON} 대상은 {target}임. "
+            f"1) review_match(focus=overview)로 경기 개요를 확인하고, "
+            f"2) review_match(focus=key_moments)로 핵심 장면을 확인하고, "
+            f"3) goals(action=check)로 진행 중 과제의 달성 여부를 확인함. "
+            f"요약할 내용: 결과와 개요 수치, 핵심 장면별 근거, 과제 진행 상황."
+        )
+
+    @mcp.prompt(name="weekly_review", description="최근 한 주 복기")
+    def weekly_review() -> str:
+        return (
+            f"{PROMPT_COMMON} "
+            f"1) analyze_form(period=week)로 이번 주 폼을 확인하고, "
+            f"2) compare_splits(split_by=win_loss, period=week)로 승리 판과 패배 판을 비교하고, "
+            f"3) goals(action=check)로 과제 진행 상황을 확인함. "
+            f"요약할 내용: 지표 변화와 비교 근거, 표본 수, 과제 진행 상황."
+        )
+
+    @mcp.prompt(name="season_review", description="시즌 전체 복기")
+    def season_review() -> str:
+        return (
+            f"{PROMPT_COMMON} "
+            f"1) analyze_form(period=season)으로 시즌 폼을 확인하고, "
+            f"2) champion_report(mode=overview)로 챔피언별 성적을 확인하고, "
+            f"3) find_habits(period=season)로 반복되는 습관 후보를 확인함. "
+            f"요약할 내용: 시즌 지표 추이, 챔피언별 근거, 반복 패턴과 표본 수."
+        )
+
+    @mcp.prompt(name="session_wrap", description="오늘 플레이 세션 정리")
+    def session_wrap() -> str:
+        return (
+            f"{PROMPT_COMMON} "
+            f"1) analyze_form(period=session)으로 오늘 세션 폼을 확인하고, "
+            f"2) review_match로 세션 중 가장 인상적이었던 경기를 확인함. "
+            f"요약할 내용: 세션 전적과 지표, 해당 경기의 근거."
+        )
 
     @mcp.tool()
     async def sync_matches(

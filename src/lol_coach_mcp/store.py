@@ -279,6 +279,33 @@ class Store:
         ).fetchone()
         return dict(row) if row else None
 
+    def baseline_summary(self) -> dict | None:
+        """저장된 기준선 요약 (티어·포지션별 지표 수, 출처, 패치, 수집일 범위). 없으면 None."""
+        groups = self._conn.execute(
+            "SELECT tier, position, COUNT(*) AS metrics, MIN(n) AS min_n FROM baselines "
+            "GROUP BY tier, position ORDER BY tier, position"
+        ).fetchall()
+        if not groups:
+            return None
+
+        def distinct(col: str) -> list[str]:
+            rows = self._conn.execute(
+                f"SELECT DISTINCT {col} FROM baselines WHERE {col} IS NOT NULL ORDER BY {col}"
+            ).fetchall()
+            return [r[0] for r in rows]
+
+        rng = self._conn.execute(
+            "SELECT MIN(collected_at) AS lo, MAX(collected_at) AS hi, COUNT(*) AS total "
+            "FROM baselines"
+        ).fetchone()
+        return {
+            "total_rows": rng["total"],
+            "groups": [dict(g) for g in groups],
+            "sources": distinct("source"),
+            "patches": distinct("patch"),
+            "collected_at": {"min": rng["lo"], "max": rng["hi"]},
+        }
+
     def upsert_baselines(self, rows: list[dict]) -> None:
         with self._conn:
             self._conn.executemany(

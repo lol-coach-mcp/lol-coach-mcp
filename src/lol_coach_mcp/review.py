@@ -116,7 +116,7 @@ def _events(timeline: dict):
         yield from frame.get("events", [])
 
 
-def _cs(pf: dict) -> int:
+def cs_of(pf: dict) -> int:
     return int(pf.get("minionsKilled", 0)) + int(pf.get("jungleMinionsKilled", 0))
 
 
@@ -138,7 +138,7 @@ def lane_checkpoints(
             continue
         pfs = frames[minute]["participantFrames"]
         mine, theirs = pfs[str(pid)], pfs[str(opp)]
-        my_cs, opp_cs = _cs(mine), _cs(theirs)
+        my_cs, opp_cs = cs_of(mine), cs_of(theirs)
         points.append(
             {
                 "minute": minute,

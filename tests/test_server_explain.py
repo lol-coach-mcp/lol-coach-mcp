@@ -129,3 +129,16 @@ async def test_tier_unknown_gives_note(store):
         r = await _x(c, "tier_baselines")
     sc = r.structured_content
     assert not r.is_error and sc["tier"] is None and sc["rows"] == [] and sc["notes"]
+
+
+async def test_next_tier_at_challenger(store):
+    riot = EmptyRiot()
+    for e in riot.league:
+        if e.get("queueType") == "RANKED_SOLO_5x5":
+            e["tier"] = "CHALLENGER"
+    async with Client(make_server(store, riot)) as c:
+        await _setup(c, store, _mixed(20))
+        r = await _x(c, "next_tier")
+    sc = r.structured_content
+    assert not r.is_error and sc["tier"] == "CHALLENGER" and sc["next_tier"] is None
+    assert sc["rows"] == []

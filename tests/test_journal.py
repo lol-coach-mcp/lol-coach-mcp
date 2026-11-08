@@ -16,6 +16,15 @@ def test_keyword_matching_case_insensitive_multiple():
     assert journal.match_topics("그냥 피곤") == []
 
 
+def test_keyword_false_positives_excluded_and_cs_standalone():
+    for t in ("딜레이가 심함", "딜러 포지션", "갱신된 패치", "ics 하나", "abcs"):
+        assert journal.match_topics(t) == [], t
+    assert journal.match_topics("CS 부족") == ["farming"]
+    assert journal.match_topics("cs, 놓침") == ["farming"]
+    assert journal.match_topics("딜이 낮음") == ["damage"]
+    assert journal.match_topics("갱 당함") == ["jungle"]
+
+
 def test_jungle_bundle_counts_early_deaths_and_highlights_jungle_zones():
     m, tl, s = _fixture()
     b = journal.build_bundle("jungle", s, m, tl, PUUID_ME)
