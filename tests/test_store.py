@@ -340,3 +340,9 @@ def test_journal_add_list_newest_first(store):
     assert [j["id"] for j in got] == [b, a]
     assert got[0]["match_id"] is None and got[1]["match_id"] == "KR_1"
     assert [j["text"] for j in store.list_journal(1)] == ["둘째 메모"]
+
+
+def test_get_journal_by_id(store):
+    a = store.add_journal("2026-11-08T10:00:00+09:00", "KR_1", "첫 메모")
+    assert store.get_journal(a)["text"] == "첫 메모"
+    assert store.get_journal(a + 100) is None

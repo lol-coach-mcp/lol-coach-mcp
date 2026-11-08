@@ -428,6 +428,10 @@ class Store:
             )
         return int(cur.lastrowid)
 
+    def get_journal(self, entry_id: int) -> dict | None:
+        row = self._conn.execute("SELECT * FROM journal WHERE id = ?", (entry_id,)).fetchone()
+        return dict(row) if row else None
+
     def list_journal(self, limit: int) -> list[dict]:
         rows = self._conn.execute(
             "SELECT * FROM journal ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)

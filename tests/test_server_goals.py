@@ -166,3 +166,38 @@ async def test_check_offline_fallback_uses_stored(store):
         _save(store, [_ms(100, deaths=2, created=last + HOUR)])
         r = await _call(c, action="check")
     assert not r.is_error and r.structured_content["goals"][0]["progress"]["games_done"] == 1
+
+
+async def test_complete_keeps_achieved_or_missed_outcome(store):
+    async with Client(make_server(store, EmptyRiot(), now=lambda: NOW)) as c:
+        last = await _with_goal(c, store)
+        _save(store, [_ms(100 + i, deaths=2, created=last + (i + 1) * HOUR) for i in range(3)])
+        await _call(c, action="check")
+        gid = store.list_goals()[0]["id"]
+        before = store.list_goals()[0]
+        assert before["status"] == "달성"
+        r = await _call(c, action="complete", goal_id=gid)
+    assert r.is_error and "달성" in r.content[0].text
+    assert store.list_goals()[0] == before
+
+
+async def test_complete_twice_rejected(store):
+    async with Client(make_server(store, EmptyRiot(), now=lambda: NOW)) as c:
+        await _with_goal(c, store)
+        gid = store.list_goals()[0]["id"]
+        assert not (await _call(c, action="complete", goal_id=gid)).is_error
+        r = await _call(c, action="complete", goal_id=gid)
+    assert r.is_error and "종료" in r.content[0].text
+
+
+async def test_check_closed_goal_id_returns_goal_with_final_status(store):
+    async with Client(make_server(store, EmptyRiot(), now=lambda: NOW)) as c:
+        last = await _with_goal(c, store)
+        _save(store, [_ms(100 + i, deaths=2, created=last + (i + 1) * HOUR) for i in range(3)])
+        await _call(c, action="check")
+        gid = store.list_goals()[0]["id"]
+        r = await _call(c, action="check", goal_id=gid)
+    assert not r.is_error
+    g = r.structured_content["goals"][0]
+    assert g["id"] == gid and g["status"] == "달성" and g["closed_at"]
+    assert "달성" in r.content[0].text

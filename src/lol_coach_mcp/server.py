@@ -14,8 +14,8 @@ from mcp_types import CallToolResult
 
 from lol_coach_mcp.config import Settings, load_settings
 from lol_coach_mcp import (
-    analysis, builds, champions, form, goals as goals_mod, habits, matchups, memory, periods,
-    review, splits,
+    analysis, builds, champions, explain as explain_mod, form, goals as goals_mod, habits,
+    journal as journal_mod, matchups, memory, periods, review, splits,
 )
 from lol_coach_mcp.ddragon import DataDragon
 from lol_coach_mcp.opgg import OpggClient, opgg_champion_key, opgg_position
@@ -28,8 +28,10 @@ from lol_coach_mcp.models import (
     DetailTeamOut,
     DuoPartnerOut,
     FormOut,
+    ExplainOut,
     GoalsOut,
     HabitsOut,
+    JournalOut,
     LaneOut,
     MasteryOut,
     MatchDetailOut,
@@ -386,6 +388,9 @@ NO_GAMES_FOR_GOAL = "저장된 솔로랭크 경기가 없어 과제를 정할 �
 GOAL_NEEDS_METRIC = "이 동작은 metric 인자가 필요함. 지원 지표: {metrics}."
 GOAL_NEEDS_ID = '이 동작은 goal_id 인자가 필요함. goals(action="list")로 확인할 수 있음.'
 GOAL_NOT_FOUND = "해당 goal_id의 과제가 없음: {goal_id}."
+GOAL_ALREADY_CLOSED = (
+    "과제 #{goal_id}은(는) 이미 {status} 상태라 결과를 유지하며 종료로 바꿀 수 없음."
+)
 NO_GOAL_TEXT = "집중 과제 없음."
 GOAL_DIRECTION_TEXT = {"up": "이상", "down": "이하"}
 NO_SUGGESTION_REASON = (
@@ -440,6 +445,123 @@ def _goals_text(out: GoalsOut) -> str:
         lines += [_goal_line(g) for g in out.goals] if out.goals else [NO_GOAL_TEXT]
         if out.action == "set":
             lines += [f"- {t}" for ts in out.practice.values() for t in ts]
+    return "\n".join(lines)
+
+
+JOURNAL_QUEUE = 420
+JOURNAL_MAX_LIMIT = 50
+JOURNAL_NEEDS_TEXT = "add에는 text 인자가 필요함. 기록할 내용을 text로 지정해야 함."
+JOURNAL_NO_MATCH_NOTE = "연결된 경기 없음"
+JOURNAL_UNLOADABLE_NOTE = "지정한 경기를 불러오지 못해 연결된 경기 없음으로 저장함"
+JOURNAL_NOT_FOUND = "해당 entry_id의 일지가 없음: {entry_id}."
+NO_JOURNAL_TEXT = "일지 없음."
+EXPLAIN_UNKNOWN = "알 수 없는 topic: {topic}. 사용할 수 있는 topic: {valid}."
+EXPLAIN_QUEUE = 420
+EXPLAIN_NO_POSITION_NOTE = "저장된 솔로랭크 경기가 없어 포지션을 알 수 없음"
+EXPLAIN_NO_NEXT_TIER_NOTE = "다음 티어 없음(최고 티어)"
+TOPIC_NOTE_NO_TIER = "현재 솔로랭크 티어를 확인하지 못해 티어 기준선을 보여줄 수 없음"
+
+
+def _journal_text(out: JournalOut) -> str:
+    lines = ["솔로랭크(큐 420) 기준 일지."]
+    lines += [n + "." for n in out.notes]
+    if out.action != "check":
+        if not out.entries:
+            lines.append(NO_JOURNAL_TEXT)
+        for e in out.entries:
+            link = e["match_id"] or JOURNAL_NO_MATCH_NOTE
+            lines.append(f"#{e['id']} {e['created_at'][:10]} [{link}] {e['text']}")
+        return "\n".join(lines)
+    for e in out.entries:
+        lines.append(f"#{e['id']} {e['created_at'][:10]} {e['text']}")
+    ev = out.evidence
+    if ev is None:
+        if out.entries:
+            lines.append(JOURNAL_NO_MATCH_NOTE + ".")
+        else:
+            lines.append(NO_JOURNAL_TEXT)
+        return "\n".join(lines)
+    matched = ", ".join(journal_mod.TOPIC_LABELS[t] for t in ev["topics"]) or "없음(기본 지표)"
+    lines.append(f"경기 {ev['match_id']} {ev['champion']} {ev['position']}, 일치 키워드: {matched}.")
+    for key, b in ev["bundles"].items():
+        lines.append(f"[{journal_mod.TOPIC_LABELS[key]}] " + _bundle_text(key, b))
+    return "\n".join(lines)
+
+
+def _none(v: Any) -> str:
+    return "없음" if v is None else str(v)
+
+
+def _bundle_text(key: str, b: dict) -> str:
+    if key == "jungle":
+        if b["early_deaths"] is None:
+            return "초반 데스 수 없음(타임라인 없음)."
+        head = f"15분 이전 데스 {b['early_deaths']}회(정글 구역 {b['jungle_zone_deaths']}회)."
+        rows = [
+            f"{d['time']} {d['zone']}{'(정글)' if d['jungle_zone'] else ''} "
+            f"킬러 {d['killer_champion'] or '알 수 없음'}"
+            for d in b["deaths"]
+        ]
+        return " ".join([head, *[r + "." for r in rows]])
+    if key == "farming":
+        return f"분당 CS {b['cs_per_min']}, 10분 CS {_none(b['cs_at_10'])}."
+    if key == "vision":
+        return (
+            f"시야 점수 {b['vision_score']} ({b['vision_per_min']}/분), 와드 설치 "
+            f"{_none(b['wards_placed'])}, 제어 와드 {_none(b['control_wards'])}, "
+            f"와드 제거 {_none(b['wards_killed'])}."
+        )
+    if key == "lane":
+        if b["points"] is None:
+            return "라인전 수치 없음(타임라인 없음)."
+        if b["status"] != "ok":
+            return f"{b['status']}."
+        pts = ", ".join(
+            f"{p['minute']}분 CS {p['cs_diff']:+d}/골드 {p['gold_diff']:+d}/경험치 {p['xp_diff']:+d}"
+            for p in b["points"]
+        )
+        return f"vs {b['opponent_champion']}: {pts}."
+    if key == "teamfight":
+        return f"킬 관여율 {b['kill_participation']}, 25분 이후 데스 {_none(b['late_deaths'])}회."
+    if key == "damage":
+        return f"팀 내 딜 비중 {b['damage_share']}."
+    return (
+        f"KDA {b['kda']}, 분당 CS {b['cs_per_min']}, 분당 시야점수 {b['vision_per_min']}, "
+        f"딜 비중 {b['damage_share']}, 킬 관여율 {b['kill_participation']}."
+    )
+
+
+def _explain_text(out: ExplainOut) -> str:
+    lines = [f"솔로랭크(큐 420) 기준, 포지션 {out.position or '-'}.", *[n + "." for n in out.notes]]
+    if out.kind == "metric":
+        better = "높을수록 좋음" if out.higher_is_better else "낮을수록 좋음"
+        lines.append(f"{out.label}({out.metric}): {out.definition}.")
+        lines.append(f"공식: {out.formula}. {better}.")
+        lines.append(
+            f"내 최근 {out.games}판 평균 {_fmt(out.metric, out.my_value)}."
+            if out.games else "저장된 솔로랭크 경기가 없어 내 값 없음."
+        )
+    elif out.kind == "tier_baselines":
+        lines.append(f"티어 {out.tier or '-'} 기준선.")
+        for r in out.rows:
+            if r["status"] != "ok":
+                lines.append(f"{r['label']}({r['metric']}): {explain_mod.NO_BASELINE}")
+            else:
+                lines.append(
+                    f"{r['label']}({r['metric']}): 평균 {_fmt(r['metric'], r['mean'])} "
+                    f"(표본 {r['n']}, 패치 {r['patch']}, 출처 {r['source']})"
+                )
+    else:
+        lines.append(f"내 티어 {out.tier or '-'}, 다음 티어 {out.next_tier or '-'}.")
+        for r in out.rows:
+            if r["status"] != "ok":
+                lines.append(f"{r['label']}({r['metric']}): {explain_mod.NO_BASELINE}")
+            else:
+                lines.append(
+                    f"{r['label']}({r['metric']}): 내 티어 {_fmt(r['metric'], r['tier_mean'])}, "
+                    f"다음 티어 {_fmt(r['metric'], r['next_tier_mean'])}, "
+                    f"차이 {r['difference']:+g}, 내 평균 {_fmt(r['metric'], r['my_value'])}"
+                )
     return "\n".join(lines)
 
 
@@ -1380,8 +1502,13 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         if action == "complete":
             if goal_id is None:
                 return tool_error(GOAL_NEEDS_ID)
-            if st.store.get_goal(goal_id) is None:
+            current = st.store.get_goal(goal_id)
+            if current is None:
                 return tool_error(GOAL_NOT_FOUND.format(goal_id=goal_id))
+            if current["status"] != goals_mod.STATUS_ACTIVE:
+                return tool_error(
+                    GOAL_ALREADY_CLOSED.format(goal_id=goal_id, status=current["status"])
+                )
             st.store.update_goal(goal_id, status=goals_mod.STATUS_CLOSED, closed_at=now_text)
             return done(goals=[_goal_view(st.store.get_goal(goal_id), None)])
 
@@ -1390,7 +1517,9 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
                 g = st.store.get_goal(goal_id)
                 if g is None:
                     return tool_error(GOAL_NOT_FOUND.format(goal_id=goal_id))
-                targets = [g] if g["status"] == goals_mod.STATUS_ACTIVE else []
+                if g["status"] != goals_mod.STATUS_ACTIVE:
+                    return done(goals=[_goal_view(g, None)])  # 마감된 과제는 최종 상태 그대로 반환
+                targets = [g]
             else:
                 targets = st.store.list_goals(status=goals_mod.STATUS_ACTIVE)
             if not targets:
@@ -1470,6 +1599,180 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             position=position, goals=[_goal_view(st.store.get_goal(new_id), None)],
             practice={metric: catalog.get(metric, [])}, notes=notes,
         )
+
+    @mcp.tool()
+    async def journal(
+        action: Literal["add", "list", "check"],
+        ctx: Context,
+        text: str | None = None,
+        match_id: str | None = None,
+        entry_id: int | None = None,
+        limit: int = 10,
+    ) -> Annotated[CallToolResult, JournalOut]:
+        """코칭 일지. add: text 기록(match_id 생략 시 최근 솔로랭크 경기에 연결, 없으면 연결 없음), list: 최근 일지(limit), check: 일지(entry_id, 생략 시 최신)의 키워드(갱/정글, CS/파밍, 시야/와드, 라인전, 한타, 딜)를 연결된 경기의 근거 데이터와 대조해 반환(키워드 없으면 기본 지표). 판정 문장 없이 근거만 반환함."""
+        st = _state(ctx)
+        p = st.store.get_profile()
+        if p is None:
+            return tool_error(NO_PROFILE_MESSAGE)
+
+        def done(**kw: Any) -> CallToolResult:
+            out = JournalOut(action=action, **kw)
+            return tool_result(out, _journal_text(out))
+
+        if action == "list":
+            return done(entries=st.store.list_journal(max(1, min(limit, JOURNAL_MAX_LIMIT))))
+
+        if action == "add":
+            if text is None or not text.strip():
+                return tool_error(JOURNAL_NEEDS_TEXT)
+            notes: list[str] = []
+            linked: str | None = None
+            if match_id is not None:
+                if st.store.get_match(match_id) is not None:
+                    linked = match_id
+                else:
+                    loaded = await _load_match(st, p, match_id)
+                    if isinstance(loaded, CallToolResult):
+                        notes.append(JOURNAL_UNLOADABLE_NOTE)
+                    else:
+                        linked = match_id
+            else:
+                recent = st.store.list_my_stats(queue=JOURNAL_QUEUE, limit=1)
+                if recent:
+                    linked = recent[0].match_id
+                else:
+                    notes.append(JOURNAL_NO_MATCH_NOTE)
+            new_id = st.store.add_journal(
+                _now_kst(st).isoformat(timespec="seconds"), linked, text.strip()
+            )
+            return done(entries=[st.store.get_journal(new_id)], notes=notes)
+
+        # check
+        if entry_id is not None:
+            entry = st.store.get_journal(entry_id)
+            if entry is None:
+                return tool_error(JOURNAL_NOT_FOUND.format(entry_id=entry_id))
+        else:
+            latest = st.store.list_journal(1)
+            if not latest:
+                return done()
+            entry = latest[0]
+        if entry["match_id"] is None:
+            return done(entries=[entry])
+        mid = entry["match_id"]
+        notes = []
+        stats = next(
+            (s for s in st.store.list_my_stats(queue=None, include_remakes=True)
+             if s.match_id == mid),
+            None,
+        )
+        if stats is None:
+            loaded = await _load_match(st, p, mid)
+            if isinstance(loaded, CallToolResult):
+                return done(entries=[entry], notes=[JOURNAL_UNLOADABLE_NOTE])
+            stats = loaded[1]
+        if stats.is_remake:
+            return done(entries=[entry], notes=["다시하기 경기라 대조할 근거를 만들지 않음"])
+        match = st.store.get_match(mid) or {}
+        timeline = st.store.get_timeline(mid)
+        if timeline is None and match.get("info"):
+            try:
+                timeline = await st.riot.get_timeline(mid)
+            except (RiotError, httpx.HTTPError):
+                timeline = None
+            else:
+                st.store.save_timeline(mid, timeline)
+        if timeline is not None:
+            try:
+                review.participant_id(timeline, p.puuid)
+            except ValueError:
+                timeline = None
+        if timeline is None or not match.get("info"):
+            timeline = None
+            notes.append(NO_TIMELINE_NOTE)
+        evidence = journal_mod.build_evidence(entry["text"], stats, match, timeline, p.puuid)
+        return done(entries=[entry], evidence=evidence, notes=notes)
+
+    @mcp.tool()
+    async def explain(topic: str, ctx: Context) -> Annotated[CallToolResult, ExplainOut]:
+        """지표·기준선 설명. topic: 지표 키 또는 한국어 라벨(정의, 공식, 높을수록 좋은지, 내 최근 20판 주 포지션 평균), tier_baselines(내 티어·포지션 기준선 표), next_tier(내 티어와 다음 티어 기준선 비교와 내 값). 기준선이 없으면 기준선 없음으로 표시함."""
+        st = _state(ctx)
+        p = st.store.get_profile()
+        if p is None:
+            return tool_error(NO_PROFILE_MESSAGE)
+        resolved = explain_mod.resolve_topic(topic)
+        if resolved is None:
+            return tool_error(
+                EXPLAIN_UNKNOWN.format(topic=topic, valid=explain_mod.valid_topics_text())
+            )
+        sync_notes = await _sync_for_analysis(st, p, EXPLAIN_QUEUE, explain_mod.RECENT_GAMES)
+        if isinstance(sync_notes, CallToolResult):
+            return sync_notes
+        stats = st.store.list_my_stats(queue=EXPLAIN_QUEUE, include_remakes=True)
+        picked, _ = periods.select(stats, "recent_n", explain_mod.RECENT_GAMES)
+        position = analysis.main_position(picked) if picked else None
+        mine = [s for s in picked if s.position == position]
+        series = analysis.metric_series(mine)
+        means = {m: (sum(v) / len(v) if v else None) for m, v in series.items()}
+        notes = list(sync_notes)
+
+        def done(**kw: Any) -> CallToolResult:
+            out = ExplainOut(topic=topic, position=position, games=len(mine), notes=notes, **kw)
+            return tool_result(out, _explain_text(out))
+
+        if resolved not in explain_mod.SPECIAL_TOPICS:
+            label, higher = analysis.METRICS[resolved]
+            definition, formula = explain_mod.DEFINITIONS[resolved]
+            return done(
+                kind="metric", metric=resolved, label=label, definition=definition,
+                formula=formula, higher_is_better=higher,
+                my_value=analysis.round_metric(resolved, means[resolved]),
+            )
+
+        tier, _ = await _solo_tier(st, p.puuid)
+        if tier is None:
+            notes.append(TOPIC_NOTE_NO_TIER)
+            return done(kind=resolved, rows=[])
+        if position is None:
+            notes.append(EXPLAIN_NO_POSITION_NOTE)
+            return done(kind=resolved, tier=tier, rows=[])
+
+        if resolved == explain_mod.TOPIC_TIER_BASELINES:
+            rows = []
+            for m, (label, _) in analysis.METRICS.items():
+                b = st.store.get_baseline(tier, position, m)
+                rows.append({
+                    "metric": m, "label": label,
+                    "status": "ok" if b else explain_mod.NO_BASELINE,
+                    "mean": analysis.round_metric(m, b["mean"]) if b else None,
+                    "std": analysis.round_metric(m, b["std"]) if b else None,
+                    "n": b["n"] if b else None,
+                    "patch": b["patch"] if b else None,
+                    "source": b["source"] if b else None,
+                    "collected_at": b["collected_at"] if b else None,
+                })
+            return done(kind=resolved, tier=tier, rows=rows)
+
+        nxt = explain_mod.next_tier(tier)
+        if nxt is None:
+            notes.append(EXPLAIN_NO_NEXT_TIER_NOTE)
+            return done(kind=resolved, tier=tier, rows=[])
+        rows = []
+        for m, (label, _) in analysis.METRICS.items():
+            cur = st.store.get_baseline(tier, position, m)
+            up = st.store.get_baseline(nxt, position, m)
+            both = cur is not None and up is not None
+            rows.append({
+                "metric": m, "label": label,
+                "status": "ok" if both else explain_mod.NO_BASELINE,
+                "tier_mean": analysis.round_metric(m, cur["mean"]) if cur else None,
+                "next_tier_mean": analysis.round_metric(m, up["mean"]) if up else None,
+                "difference": (
+                    analysis.round_metric(m, up["mean"] - cur["mean"]) if both else None
+                ),
+                "my_value": analysis.round_metric(m, means[m]),
+            })
+        return done(kind=resolved, tier=tier, next_tier=nxt, rows=rows)
 
     @mcp.tool()
     async def find_habits(

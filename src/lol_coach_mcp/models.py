@@ -35,6 +35,32 @@ class GoalsOut(BaseModel):
     notes: list[str] = []
 
 
+class JournalOut(BaseModel):
+    action: str
+    queue: int = 420
+    entries: list[dict] = []
+    evidence: dict | None = None
+    notes: list[str] = []
+
+
+class ExplainOut(BaseModel):
+    topic: str
+    kind: str  # metric | tier_baselines | next_tier
+    queue: int = 420
+    metric: str | None = None
+    label: str | None = None
+    definition: str | None = None
+    formula: str | None = None
+    higher_is_better: bool | None = None
+    position: str | None = None
+    games: int = 0
+    my_value: float | None = None
+    tier: str | None = None
+    next_tier: str | None = None
+    rows: list[dict] = []
+    notes: list[str] = []
+
+
 class SyncOut(BaseModel):
     new_matches: int
     total_stored: int
