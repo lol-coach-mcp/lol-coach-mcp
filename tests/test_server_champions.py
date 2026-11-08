@@ -296,3 +296,55 @@ async def test_focus_text_labels_win_loss(store):
     r = await _run(store, _games([("Kaisa", 12, 6)]), {"mode": "focus", "champion": "Kaisa"})
     text = r.content[0].text
     assert "승리 판 vs 패배 판:" in text and "패배 판 " in text
+
+
+async def test_focus_text_dedicated_winloss_format(store):
+    r = await _run(store, _games([("Kaisa", 12, 6)]), {"mode": "focus", "champion": "Kaisa"})
+    lines = r.content[0].text.split("\n")
+    rows = lines[lines.index("승리 판 vs 패배 판:") + 1:]
+    metric_lines = [x for x in rows if x.startswith(("KDA", "데스", "분당 CS")) or "승리 판 " in x]
+    assert metric_lines and all("승리 판 " in x and "패배 판 " in x for x in metric_lines[:3])
+    assert not any(x.startswith("내 ") or ": 내 " in x for x in rows)
+
+
+async def test_texts_never_print_none(store):
+    analysis = {**ANALYSIS, "summary": {"average_stats": {"play": None, "win_rate": 0.49,
+                                                          "kda": None, "tier": None}},
+                "weak_counters": [{"champion_id": 1, "champion_name": None, "play": None,
+                                   "win_rate": None}]}
+    stats = _games([("Kaisa", 12, 6), ("Jinx", 3, 1)])
+    for args in ({}, {"mode": "focus", "champion": "Kaisa"}, {"mode": "pool"},
+                 {"mode": "progress", "champion": "Jinx"}, {"mode": "similar"}):
+        r = await _run(store, stats, args, opgg=FakeOpgg(analysis=analysis))
+        assert not r.is_error
+        assert "None" not in r.content[0].text, args
+
+
+async def test_similar_ddragon_down_skips_lane_meta(store):
+    opgg = FakeOpgg()
+    dd = FakeDD(error=httpx.ConnectTimeout("t"))
+    r = await _run(store, _games(SPEC), {"mode": "similar"}, opgg=opgg, dd=dd)
+    sc = r.structured_content
+    assert not r.is_error and sc["status"] == "Data Dragon 데이터 없음"
+    assert opgg.meta_calls == [] and sc["similar"]["candidates"] == []
+    assert "Data Dragon 데이터 없음" in r.content[0].text
+
+
+async def test_unknown_champion_error_mentions_ddragon_when_down(store):
+    dd = FakeDD(error=httpx.ConnectTimeout("t"))
+    r = await _run(store, _games(SPEC), {"mode": "focus", "champion": "카이사"}, dd=dd)
+    assert r.is_error and "Data Dragon" in r.content[0].text
+    r = await _run(store, _games(SPEC), {"mode": "focus", "champion": "없는챔프"})
+    assert r.is_error and "Data Dragon" not in r.content[0].text
+
+
+async def test_similar_text_shows_korean_base_name(store):
+    stats = _games([("Kaisa", 12, 6), ("Draven", 10, 5), ("Jinx", 8, 4)])
+    r = await _run(store, stats, {"mode": "similar"})
+    assert "기준 챔피언 카이사" in r.content[0].text
+    assert r.structured_content["similar"]["base_name"] == "카이사"
+
+
+async def test_overview_notes_candidates_only_among_top5(store):
+    r = await _run(store, _games(SPEC), {})
+    assert any("주력 후보" in n and "5개" in n for n in r.structured_content["notes"])

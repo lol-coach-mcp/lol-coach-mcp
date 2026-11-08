@@ -19,6 +19,7 @@ PROGRESS_CHUNK = 5
 STATUS_OK = "ok"
 STATUS_HOLD = "판단 보류"
 STATUS_NO_OPGG = "OP.GG 데이터 없음"
+STATUS_NO_DDRAGON = "Data Dragon 데이터 없음"
 STATUS_PARTIAL = "부분 구간"
 
 LABEL_NARROW = "좁음"
@@ -226,7 +227,8 @@ def similar_candidates(
             "my_games": len(groups.get(key, [])),
         })
     found.sort(key=lambda c: (-len(c["shared_tags"]), c["tier"], c["rank"] or 9999, c["champion"]))
-    return {"base_champion": top_key, "base_tags": sorted(top_tags),
+    return {"base_champion": top_key, "base_name": display_name(top_key, ddragon),
+            "base_tags": sorted(top_tags),
             "candidates": found[:SIMILAR_MAX]}
 
 

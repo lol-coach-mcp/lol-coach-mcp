@@ -287,3 +287,35 @@ class ChampionReportOut(BaseModel):
     similar: dict | None = None
     progress: list[dict] = []
     notes: list[str] = []
+
+
+class MatchupReportOut(BaseModel):
+    mode: str  # "my_champion" | "pick"
+    period_desc: str
+    queue: int | None = None
+    games: int
+    tier_basis: str
+    my_champion: str | None = None
+    my_champion_name: str | None = None
+    position: str | None = None
+    status: str = "ok"
+    candidates: list[dict] = []
+    rows: list[dict] = []
+    notes: list[str] = []
+
+
+class BuildReportOut(BaseModel):
+    period_desc: str
+    queue: int | None = None
+    games: int
+    tier_basis: str
+    champion: str
+    champion_name: str
+    position: str | None = None
+    status: str = "ok"
+    core_items: list[dict] = []
+    boots: list[dict] = []
+    runes: list[dict] = []
+    spells: list[dict] = []
+    opgg: dict | None = None
+    notes: list[str] = []

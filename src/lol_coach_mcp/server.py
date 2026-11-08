@@ -13,10 +13,13 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp_types import CallToolResult
 
 from lol_coach_mcp.config import Settings, load_settings
-from lol_coach_mcp import analysis, champions, form, habits, periods, review, splits
+from lol_coach_mcp import (
+    analysis, builds, champions, form, habits, matchups, periods, review, splits,
+)
 from lol_coach_mcp.ddragon import DataDragon
 from lol_coach_mcp.opgg import OpggClient, opgg_champion_key, opgg_position
 from lol_coach_mcp.models import (
+    BuildReportOut,
     ChampionReportOut,
     CoachContextOut,
     DeathOut,
@@ -30,6 +33,7 @@ from lol_coach_mcp.models import (
     MatchDetailOut,
     MatchHistoryOut,
     MatchRowOut,
+    MatchupReportOut,
     MomentOut,
     ObjectivesOut,
     PlayerProfileOut,
@@ -347,10 +351,16 @@ async def _sync_for_analysis(
 CHAMPION_DEFAULT_COUNT = 50
 CHAMPION_QUEUE = 420
 NOTE_TIER_ALL = "솔로랭크 티어가 없어 OP.GG는 전체 티어 기준"
-NOTE_OPGG_LIMIT = f"OP.GG 조회는 판수 상위 {champions.OPGG_TOP_N}개 챔피언만 수행함"
+NOTE_OPGG_LIMIT = (
+    f"OP.GG 조회와 주력 후보 계산은 판수 상위 {champions.OPGG_TOP_N}개 챔피언만 대상으로 함"
+)
 NOTE_NO_DDRAGON = "Data Dragon 데이터를 불러오지 못해 챔피언 이름·태그 정보가 제한됨"
 NOTE_LANE_META_ALL = "OP.GG 레인 메타는 전체 티어 기준"
 UNKNOWN_CHAMPION_MESSAGE = "알 수 없는 챔피언: {name}. 한국어 이름이나 영문 키를 확인해야 함."
+UNKNOWN_CHAMPION_NO_DDRAGON = (
+    " Data Dragon 데이터를 불러오지 못해 한국어 이름은 해석할 수 없고, 내 경기에 있는 영문 키만 인식함."
+)
+DASH = "-"
 NEED_CHAMPION_MESSAGE = "이 모드는 champion 인자가 필요함. 한국어 이름이나 영문 키를 지정해야 함."
 
 
@@ -374,23 +384,48 @@ async def _opgg_analysis(
     )
 
 
+def _v(v: Any) -> str:
+    """None은 '-'로 표시(텍스트에 'None'이 나오지 않게 함)."""
+    return DASH if v is None else str(v)
+
+
 def _pct1(v: float | None) -> str:
-    return "없음" if v is None else f"{v * 100:.1f}%"
+    return DASH if v is None else f"{v * 100:.1f}%"
+
+
+def _signed(v: float | None, fmt: str) -> str:
+    return DASH if v is None else format(v, fmt)
+
+
+def _unknown_champion_message(name: str, dd: dict | None) -> str:
+    return UNKNOWN_CHAMPION_MESSAGE.format(name=name) + (UNKNOWN_CHAMPION_NO_DDRAGON if dd is None else "")
+
+
+def _winloss_row_text(row: dict) -> str:
+    """focus 모드의 승리 판 vs 패배 판 근거 행(my_value=승리 판, ref_value=패배 판)."""
+    m = row["metric"]
+    head = (f"{row['label']}: 승리 판 {_fmt(m, row['my_value'])}({row['my_sample']}판), "
+            f"패배 판 {_fmt(m, row['ref_value'])}({_v(row['ref_sample'])}판)")
+    if row["status"] != analysis.STATUS_OK:
+        return f"{head} [{row['status']}]"
+    gap = "큰 차이" if row["strong_gap"] else "뚜렷한 차이" if row["clear_gap"] else "뚜렷하지 않은 차이"
+    return f"{head}, 차이 {row['difference']:+g}, 오차폭 ±{_fmt(m, row['margin'])} [{gap}]"
 
 
 def _opgg_text(o: dict | None) -> str:
     if not o or o.get("status") != champions.STATUS_OK:
         return champions.STATUS_NO_OPGG
-    head = f"OP.GG 승률 {_pct1(o['win_rate'])}, KDA {o['kda']}({o['play']}판 기준)"
+    head = f"OP.GG 승률 {_pct1(o['win_rate'])}, KDA {_v(o['kda'])}({_v(o['play'])}판 기준)"
     if o["win_rate_diff"] is None:
         return head
-    return f"{head}, 차이 승률 {o['win_rate_diff'] * 100:+.1f}%p, KDA {o['kda_diff']:+.2f}"
+    wr = DASH if o["win_rate_diff"] is None else f"{o['win_rate_diff'] * 100:+.1f}%p"
+    return f"{head}, 차이 승률 {wr}, KDA {_signed(o['kda_diff'], '+.2f')}"
 
 
 def _champ_line(r: dict) -> str:
     base = (
-        f"{r['name']}({r['position']}): {r['games']}판 {r['win_rate'] * 100:.1f}%, "
-        f"KDA {r['kda']}, 분당 CS {r['cs_per_min']}, 딜 비중 {r['damage_share']}"
+        f"{r['name']}({r['position']}): {r['games']}판 {_pct1(r['win_rate'])}, "
+        f"KDA {_v(r['kda'])}, 분당 CS {_v(r['cs_per_min'])}, 딜 비중 {_v(r['damage_share'])}"
     )
     if r["status"] != champions.STATUS_OK:
         base += f" [{r['status']}]"
@@ -419,13 +454,13 @@ def _champion_text(out: ChampionReportOut) -> str:
                                       "opgg": out.opgg}))
         lines.append("승리 판 vs 패배 판:")
         for r in out.rows:
-            lines.append(_row_text(r).replace("내 ", "승리 판 ", 1).replace("기준 ", "패배 판 ", 1))
+            lines.append(_winloss_row_text(r))
         if out.counters:
             for title, key in (("상대하기 어려운 챔피언(OP.GG)", "hard_against"),
                                ("상대하기 쉬운 챔피언(OP.GG)", "easy_against")):
                 items = out.counters[key]
                 lines.append(f"{title}: " + (", ".join(
-                    f"{c['champion']}({c['play']}판)" for c in items) or "없음") + ".")
+                    f"{_v(c['champion'])}({_v(c['play'])}판)" for c in items) or "없음") + ".")
     elif out.mode == "pool" and out.pool:
         pl = out.pool
         lines.append(
@@ -435,10 +470,11 @@ def _champion_text(out: ChampionReportOut) -> str:
         lines += [f"{b['position_name']}: 챔피언 {b['champions']}개" for b in pl["by_position"]]
     elif out.mode == "similar" and out.similar:
         sm = out.similar
-        lines.append(f"기준 챔피언 {sm['base_champion']}, 태그 {', '.join(sm['base_tags'])}.")
+        base = sm.get("base_name") or sm["base_champion"]
+        lines.append(f"기준 챔피언 {base}, 태그 {', '.join(sm['base_tags']) or DASH}.")
         for c in sm["candidates"]:
             lines.append(
-                f"{c['name']}: 공통 태그 {', '.join(c['shared_tags'])}, OP.GG {c['tier']}티어, "
+                f"{c['name']}: 공통 태그 {', '.join(c['shared_tags'])}, OP.GG {_v(c['tier'])}티어, "
                 f"승률 {_pct1(c['win_rate'])}, 내 기록 {c['my_games']}판"
             )
         if not sm["candidates"]:
@@ -446,10 +482,140 @@ def _champion_text(out: ChampionReportOut) -> str:
     elif out.mode == "progress":
         for c in out.progress:
             lines.append(
-                f"{c['chunk']}구간({c['games']}판): 승률 {_pct1(c['win_rate'])}, KDA {c['kda']}, "
-                f"분당 CS {c['cs_per_min']}, 딜 비중 {c['damage_share']}, 데스 {c['deaths']}"
+                f"{c['chunk']}구간({c['games']}판): 승률 {_pct1(c['win_rate'])}, KDA {_v(c['kda'])}, "
+                f"분당 CS {_v(c['cs_per_min'])}, 딜 비중 {_v(c['damage_share'])}, 데스 {_v(c['deaths'])}"
                 + (f" [{c['status']}]" if c["status"] != champions.STATUS_OK else "")
             )
+    if out.status != champions.STATUS_OK:
+        lines.append(f"상태: {out.status}.")
+    return "\n".join(lines)
+
+
+MATCHUP_DEFAULT_COUNT = 50
+NOTE_MATCHUP_ALL_TIERS = "OP.GG 매치업 요약은 티어 구분 없이 전체 기준"
+NOTE_CANDIDATE_LIMIT = (
+    f"OP.GG 조회는 후보 판수 상위 {matchups.OPGG_CANDIDATE_LIMIT}개만 수행함(나머지는 내 기록만 표시)"
+)
+NOTE_NO_DDRAGON_BUILD = "Data Dragon 데이터를 불러오지 못해 아이템·룬 이름과 조합을 집계하지 못함"
+NOTE_NO_DETAIL = "경기 상세 데이터 없음으로 빌드 집계에서 제외한 판: {n}판"
+NEED_ENEMIES_MESSAGE = "enemies에 상대 챔피언을 1개 이상 지정해야 함."
+TOO_MANY_ENEMIES_MESSAGE = f"enemies는 최대 {matchups.MAX_ENEMIES}개까지 지정할 수 있음."
+
+
+async def _ddragon_data(st: AppState, name: str) -> dict | None:
+    """Data Dragon items()/runes(). 없거나 실패하면 None."""
+    if st.ddragon is None:
+        return None
+    try:
+        return await getattr(st.ddragon, name)()
+    except httpx.HTTPError:
+        return None
+
+
+async def _opgg_lane_matchup(
+    st: AppState, team_position: str | None, my_key: str, opp_key: str, dd_keys: list[dict]
+) -> dict | None:
+    pos = opgg_position(team_position)
+    if st.opgg is None or pos is None:
+        return None
+    return await st.opgg.lane_matchup(
+        pos, opgg_champion_key(my_key, dd_keys), opgg_champion_key(opp_key, dd_keys)
+    )
+
+
+def _gold(v: float | None) -> str:
+    return DASH if v is None else f"{v:+.0f}"
+
+
+def _record_text(r: dict) -> str:
+    base = f"내 기록 {r['games']}판 {_pct1(r['win_rate'])}"
+    if r["timeline_games"]:
+        base += f", 15분 골드차 평균 {_gold(r['avg_gold_diff_15'])}(타임라인 {r['timeline_games']}판)"
+    else:
+        base += ", 15분 골드차 -(타임라인 0판)"
+    if r["status"] != champions.STATUS_OK:
+        base += f" [{r['status']}]"
+    return base
+
+
+def _opgg_matchup_text(o: dict | None) -> str:
+    if not o or o.get("status") != champions.STATUS_OK:
+        return champions.STATUS_NO_OPGG
+    m = o.get("matchup")
+    head = (f"OP.GG 매치업 승률 {_pct1(m['win_rate'])}({m['play']}판)" if m
+            else "OP.GG 매치업 표본 -")
+    ov = o["my_champion_overall"]
+    return (f"{head}, 내 챔피언 전체 통계(매치업 아님) 승률 {_pct1(ov['win_rate'])} "
+            f"KDA {_v(ov['kda'])}({_v(ov['play'])}판), 라인 우세 {_v(o['lane_advantage'])}, "
+            f"플레이 스타일 {_v(o['recommended_play_style'])}")
+
+
+def _counter_text(row: dict) -> str:
+    c = row.get("counter")
+    if c is None:
+        return row["opgg_status"]
+    if c["my_win_rate"] is None:
+        return f"OP.GG {c['relation']}"
+    return f"OP.GG {c['relation']}(내 챔피언 승률 {_pct1(c['my_win_rate'])}, {_v(c['play'])}판)"
+
+
+def _matchup_text(out: MatchupReportOut) -> str:
+    head = f"{out.period_desc}, {queue_label(out.queue)}, {out.games}판, OP.GG 기준: {out.tier_basis}."
+    if out.mode == "my_champion":
+        head += f" 내 챔피언 {out.my_champion_name}, 같은 라인 상대와의 매치업."
+    else:
+        head += " 챔피언 선택용: 주 포지션 챔피언 풀 후보별 상대 기록."
+    lines = [head] + [n + "." for n in out.notes]
+    for r in out.rows:
+        if r["status"] == matchups.STATUS_UNKNOWN:
+            lines.append(f"{r['input']}: {matchups.STATUS_UNKNOWN}")
+        elif out.mode == "my_champion":
+            lines.append(f"{r['enemy_name']}: {_record_text(r)} | {_opgg_matchup_text(r['opgg'])}")
+        else:
+            lines.append(f"{r['candidate_name']} vs {r['enemy_name']}: {_record_text(r)} | "
+                         f"{_counter_text(r)}")
+    if out.status != champions.STATUS_OK:
+        lines.append(f"상태: {out.status}.")
+    return "\n".join(lines)
+
+
+def _build_group_line(g: dict) -> str:
+    line = f"{' + '.join(g['names'])}: {g['games']}판 {_pct1(g['win_rate'])}"
+    if g["status"] != champions.STATUS_OK:
+        line += f" [{g['status']}]"
+    if g["overlap"] is not None:
+        line += f" | OP.GG {'겹침' if g['overlap'] else '겹치지 않음'}"
+    return line
+
+
+def _opgg_options_text(o: dict) -> list[str]:
+    if o.get("status") != champions.STATUS_OK:
+        return [champions.STATUS_NO_OPGG]
+
+    def names(x):
+        return " + ".join(x.get("ids_names") or []) or DASH
+
+    out = []
+    for title, key in (("핵심 아이템", "core_items"), ("신발", "boots"), ("소환사 주문", "spells")):
+        out.append(f"OP.GG 추천 {title}: " + (" / ".join(
+            f"{names(x)}({_pct1(x['win_rate'])}, {_v(x['play'])}판)" for x in o[key]) or DASH))
+    out.append("OP.GG 추천 룬: " + (" / ".join(
+        f"{_v(x['primary_page_name'])} {', '.join(x['primary_rune_names'] or []) or DASH}"
+        f"({_pct1(x['win_rate'])}, {_v(x['play'])}판)" for x in o["runes"]) or DASH))
+    return out
+
+
+def _build_text(out: BuildReportOut) -> str:
+    lines = [f"{out.period_desc}, {queue_label(out.queue)}, {out.champion_name} {out.games}판, "
+             f"OP.GG 비교 기준: {out.tier_basis}."]
+    lines += [n + "." for n in out.notes]
+    for title, groups in (("최종 핵심 아이템", out.core_items), ("신발", out.boots),
+                          ("핵심 룬", out.runes), ("소환사 주문", out.spells)):
+        if groups:
+            lines.append(f"{title} 조합:")
+            lines += [_build_group_line(g) for g in groups]
+    if out.opgg is not None:
+        lines += _opgg_options_text(out.opgg)
     if out.status != champions.STATUS_OK:
         lines.append(f"상태: {out.status}.")
     return "\n".join(lines)
@@ -1162,7 +1328,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         if champion:
             key = champions.resolve_champion(champion, dd, list(groups))
             if key is None:
-                return tool_error(UNKNOWN_CHAMPION_MESSAGE.format(name=champion))
+                return tool_error(_unknown_champion_message(champion, dd))
 
         tier = None
         if mode in ("overview", "focus"):
@@ -1220,10 +1386,13 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         elif mode == "similar":
             base = max(groups, key=lambda k: (len(groups[k]), k))
             pos = opgg_position(champions.main_position(groups[base]))
-            meta = await st.opgg.lane_meta(pos) if (st.opgg is not None and pos) else None
+            meta = None
+            if dd is not None:
+                meta = await st.opgg.lane_meta(pos) if (st.opgg is not None and pos) else None
             if dd is None or not meta:
-                out.status = champions.STATUS_NO_OPGG
-                out.similar = {"base_champion": base, "base_tags": [], "candidates": []}
+                out.status = champions.STATUS_NO_DDRAGON if dd is None else champions.STATUS_NO_OPGG
+                out.similar = {"base_champion": base, "base_name": champions.display_name(base, dd),
+                               "base_tags": [], "candidates": []}
             else:
                 out.similar = champions.similar_candidates(picked, dd, meta)
         else:  # progress
@@ -1236,5 +1405,226 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
                 out.status = champions.STATUS_HOLD
                 out.notes.append(f"해당 챔피언 {champions.MIN_GAMES}판 미만이라 판단 보류")
         return tool_result(out, _champion_text(out))
+
+    @mcp.tool()
+    async def matchup_report(
+        ctx: Context,
+        enemies: list[str],
+        my_champion: str | None = None,
+        count: int = MATCHUP_DEFAULT_COUNT,
+    ) -> Annotated[CallToolResult, MatchupReportOut]:
+        """상대 챔피언(enemies, 한국어 이름 또는 영문 키, 최대 5개) 대비 내 솔로랭크 기록과 OP.GG 요약. my_champion 지정 시: 내가 그 챔피언으로 같은 라인에서 각 상대를 만난 판들의 판수·승률·15분 골드차 평균(저장된 타임라인이 있는 판만, 판수 표기)과 OP.GG 매치업 요약(매치업 승률, 내 챔피언 전체 통계는 별도 표기). my_champion 생략 시(챔피언 선택용): 내 주 포지션 챔피언 중 5판 이상 한 후보 각각이 enemies 상대와 만난 기록과 OP.GG 카운터 정보를 근거 행으로 정렬(내 판수, 승률 순, OP.GG 조회는 후보 5개까지). 상대별 3판 미만은 판단 보류, 못 찾은 챔피언은 알 수 없는 챔피언. 새 타임라인은 받지 않으며 OP.GG 실패 시 해당 부분만 OP.GG 데이터 없음. 매번 새 경기를 동기화하고 실패하면 저장된 데이터 기준."""
+        st = _state(ctx)
+        p = st.store.get_profile()
+        if p is None:
+            return tool_error(NO_PROFILE_MESSAGE)
+        if not enemies:
+            return tool_error(NEED_ENEMIES_MESSAGE)
+        if len(enemies) > matchups.MAX_ENEMIES:
+            return tool_error(TOO_MANY_ENEMIES_MESSAGE)
+        count = max(1, min(count, ANALYSIS_MAX_COUNT))
+        sync_notes = await _sync_for_analysis(st, p, CHAMPION_QUEUE, count)
+        if isinstance(sync_notes, CallToolResult):
+            return sync_notes
+        all_stats = st.store.list_my_stats(queue=CHAMPION_QUEUE, include_remakes=True)
+        picked, period_desc = periods.select(all_stats, "recent_n", count)
+        notes = list(sync_notes)
+        dd = await _ddragon_champions(st)
+        if dd is None:
+            notes.append(NOTE_NO_DDRAGON)
+        dd_keys = [{"key": k} for k in (dd or {})]
+        entries = matchups.lane_entries(picked, st.store.get_match, p.puuid)
+        played = sorted({e["stats"].champion for e in entries}
+                        | {e["opponent"] for e in entries if e["opponent"]})
+        resolved = [(q, champions.resolve_champion(q, dd, played)) for q in enemies]
+        unknown_rows = [
+            {"input": q, "enemy": None, "enemy_name": None, "status": matchups.STATUS_UNKNOWN,
+             "games": 0, "wins": 0, "win_rate": None, "timeline_games": 0,
+             "avg_gold_diff_15": None}
+            for q, k in resolved if k is None
+        ]
+        known = [(q, k) for q, k in resolved if k is not None]
+
+        def rec(es):
+            return matchups.record(es, st.store.get_timeline, p.puuid)
+
+        if my_champion:
+            my_key = champions.resolve_champion(my_champion, dd, played)
+            if my_key is None:
+                return tool_error(_unknown_champion_message(my_champion, dd))
+            mine = [e for e in entries if e["stats"].champion == my_key]
+            base_games = [e["stats"] for e in mine] or picked
+            team_pos = champions.main_position(base_games) if base_games else None
+            notes.append(NOTE_MATCHUP_ALL_TIERS)
+            data = await asyncio.gather(*(
+                _opgg_lane_matchup(st, team_pos, my_key, k, dd_keys) for _, k in known
+            ))
+            rows = []
+            for (q, k), d in zip(known, data):
+                r = rec([e for e in mine if e["opponent"] == k])
+                rows.append({"input": q, "enemy": k, "enemy_name": champions.display_name(k, dd),
+                             **r, "opgg": matchups.matchup_block(d)})
+            order = {q: i for i, q in enumerate(enemies)}  # 입력 순서 유지
+            rows = sorted(rows + unknown_rows, key=lambda r: order[r["input"]])
+            out = MatchupReportOut(
+                mode="my_champion", period_desc=period_desc, queue=CHAMPION_QUEUE,
+                games=len(picked), tier_basis="전체 티어 기준", my_champion=my_key,
+                my_champion_name=champions.display_name(my_key, dd), position=team_pos,
+                rows=rows, notes=notes,
+            )
+            if not picked:
+                out.status = champions.STATUS_HOLD
+                out.notes.append("기간 내 솔로랭크 경기가 없음")
+            return tool_result(out, _matchup_text(out))
+
+        # 챔피언 선택 모드
+        main_pos = champions.main_position(picked) if picked else None
+        cands = matchups.pick_candidates(picked, main_pos) if main_pos else []
+        tier, _ = await _solo_tier(st, p.puuid)
+        tier_basis = f"{tier} 티어 기준" if tier else "전체 티어 기준"
+        if not tier:
+            notes.append(NOTE_TIER_ALL)
+        queried = cands[: matchups.OPGG_CANDIDATE_LIMIT]
+        if len(cands) > len(queried):
+            notes.append(NOTE_CANDIDATE_LIMIT)
+        analyses = await asyncio.gather(*(
+            _opgg_analysis(st, c["champion"], main_pos, tier, dd_keys) for c in queried
+        ))
+        analysis_by = {c["champion"]: d for c, d in zip(queried, analyses)}
+        rows = []
+        for c in cands:
+            queried_c = c["champion"] in analysis_by
+            data = analysis_by.get(c["champion"])
+            games_c = [e for e in entries
+                       if e["stats"].champion == c["champion"] and e["stats"].position == main_pos]
+            for q, k in known:
+                r = rec([e for e in games_c if e["opponent"] == k])
+                info = (dd or {}).get(k) or {}
+                counter = matchups.counter_info(data, info.get("id"), info.get("name"))
+                if not queried_c:
+                    opgg_status = matchups.STATUS_NOT_QUERIED
+                elif data is None:
+                    opgg_status = champions.STATUS_NO_OPGG
+                else:
+                    opgg_status = champions.STATUS_OK
+                rows.append({
+                    "input": q, "candidate": c["champion"],
+                    "candidate_name": champions.display_name(c["champion"], dd),
+                    "enemy": k, "enemy_name": champions.display_name(k, dd), **r,
+                    "counter": counter, "opgg_status": opgg_status,
+                })
+        rows = matchups.sort_pick_rows(rows) + unknown_rows
+        out = MatchupReportOut(
+            mode="pick", period_desc=period_desc, queue=CHAMPION_QUEUE, games=len(picked),
+            tier_basis=tier_basis, position=main_pos, rows=rows, notes=notes,
+            candidates=[{
+                "champion": c["champion"], "name": champions.display_name(c["champion"], dd),
+                "games": c["games"], "wins": c["wins"], "win_rate": round(c["wins"] / c["games"], 3),
+            } for c in cands],
+        )
+        if not cands:
+            out.status = champions.STATUS_HOLD
+            out.notes.append(
+                f"주 포지션에서 {matchups.CANDIDATE_MIN_GAMES}판 이상 한 챔피언이 없어 후보를 계산하지 못함"
+            )
+        return tool_result(out, _matchup_text(out))
+
+    @mcp.tool()
+    async def build_report(
+        ctx: Context,
+        champion: str,
+        count: int = MATCHUP_DEFAULT_COUNT,
+    ) -> Annotated[CallToolResult, BuildReportOut]:
+        """내 솔로랭크 최근 N판 중 지정 챔피언(한국어 이름 또는 영문 키) 판들의 빌드 리포트. 최종 아이템(item0~5, 신발·소모품·장신구 제외 핵심 아이템 조합), 신발, 핵심 룬(첫 번째 룬), 소환사 주문 조합별 판수·승률(조합 3판 미만은 판단 보류, 분류별 상위 5개)과, OP.GG의 같은 티어·포지션 추천 핵심 아이템·신발·룬·소환사 주문과 겹치는지(겹침 여부와 OP.GG 순위). 언랭이면 전체 티어 기준. Data Dragon이 없으면 아이템·룬 조합은 생략하고 소환사 주문만, OP.GG 실패 시 겹침 표시 없이 내 데이터만 반환. 매번 새 경기를 동기화하고 실패하면 저장된 데이터 기준."""
+        st = _state(ctx)
+        p = st.store.get_profile()
+        if p is None:
+            return tool_error(NO_PROFILE_MESSAGE)
+        count = max(1, min(count, ANALYSIS_MAX_COUNT))
+        sync_notes = await _sync_for_analysis(st, p, CHAMPION_QUEUE, count)
+        if isinstance(sync_notes, CallToolResult):
+            return sync_notes
+        all_stats = st.store.list_my_stats(queue=CHAMPION_QUEUE, include_remakes=True)
+        picked, period_desc = periods.select(all_stats, "recent_n", count)
+        notes = list(sync_notes)
+        dd = await _ddragon_champions(st)
+        if dd is None:
+            notes.append(NOTE_NO_DDRAGON)
+        dd_keys = [{"key": k} for k in (dd or {})]
+        groups = champions.group_by_champion(picked)
+        key = champions.resolve_champion(champion, dd, list(groups))
+        if key is None:
+            return tool_error(_unknown_champion_message(champion, dd))
+        games = groups.get(key, [])
+        out = BuildReportOut(
+            period_desc=period_desc, queue=CHAMPION_QUEUE, games=len(games),
+            tier_basis="전체 티어 기준", champion=key,
+            champion_name=champions.display_name(key, dd), notes=notes,
+        )
+        if not games:
+            out.status = champions.STATUS_HOLD
+            out.notes.append("기간 내 해당 챔피언 경기가 없음")
+            return tool_result(out, _build_text(out))
+
+        team_pos = champions.main_position(games)
+        out.position = team_pos
+        items = await _ddragon_data(st, "items")
+        rune_names = await _ddragon_data(st, "runes")
+        if items is None or rune_names is None:
+            out.notes.append(NOTE_NO_DDRAGON_BUILD)
+        core_rows, boot_rows, rune_rows, spell_rows = [], [], [], []
+        no_detail = 0
+        for s in games:
+            me = builds.participant(st.store.get_match(s.match_id), p.puuid)
+            if me is None:
+                no_detail += 1
+                continue
+            if items is not None:
+                core, boots = builds.split_items(me, items)
+                core_rows.append((core, s.win))
+                boot_rows.append((boots, s.win))
+            if rune_names is not None:
+                ks = builds.keystone_id(me)
+                rune_rows.append(((ks,) if ks else (), s.win))
+            spell_rows.append((builds.spell_key(me), s.win))
+        if no_detail:
+            out.notes.append(NOTE_NO_DETAIL.format(n=no_detail))
+
+        tier, _ = await _solo_tier(st, p.puuid)
+        out.tier_basis = f"{tier} 티어 기준" if tier else "전체 티어 기준"
+        if not tier:
+            out.notes.append(NOTE_TIER_ALL)
+        data = await _opgg_analysis(st, key, team_pos, tier, dd_keys)
+        out.opgg = builds.opgg_summary(data)
+        have = out.opgg["status"] == champions.STATUS_OK
+
+        def finish(rows, title, namer, option_key, matcher):
+            found = builds.tally(rows)
+            if len(found) > builds.GROUP_LIMIT:
+                out.notes.append(f"{title} 조합 {len(found)}개 중 상위 {builds.GROUP_LIMIT}개만 표시함")
+                found = found[: builds.GROUP_LIMIT]
+            for g in found:
+                g["names"] = [namer(i) for i in g["ids"]]
+                rank = builds.opgg_rank(data.get(option_key), matcher(g)) if have else None
+                g["opgg_rank"] = rank
+                g["overlap"] = (rank is not None) if have else None
+            return found
+
+        def item_name(i):
+            return ((items or {}).get(i) or {}).get("name") or f"아이템 {i}"
+
+        def rune_name(i):
+            return ((rune_names or {}).get(i) or {}).get("name") or f"룬 {i}"
+
+        out.core_items = finish(core_rows, "핵심 아이템", item_name, "core_items",
+                                lambda g: builds.core_matches(g["ids"]))
+        out.boots = finish(boot_rows, "신발", item_name, "boots",
+                           lambda g: builds.core_matches(g["ids"]))
+        out.runes = finish(rune_rows, "핵심 룬", rune_name, "runes",
+                           lambda g: builds.keystone_matches(rune_name(g["ids"][0])))
+        out.spells = finish(
+            spell_rows, "소환사 주문", lambda i: builds.SPELL_NAMES.get(i, f"소환사 주문 {i}"),
+            "summoner_spells", lambda g: builds.spells_match(g["ids"]))
+        return tool_result(out, _build_text(out))
 
     return mcp
