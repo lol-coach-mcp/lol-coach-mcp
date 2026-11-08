@@ -7,7 +7,7 @@ import httpx
 import pytest
 from mcp import Client
 
-from conftest import PUUID_ME, load_fixture
+from conftest import PUUID_ME, load_fixture, make_synthetic_match, make_synthetic_timeline
 from lol_coach_mcp.riot.errors import RiotServerError
 from lol_coach_mcp.stats import extract_match_stats
 from test_server_profile import RIOT_ID, FakeRiot, make_server, store  # noqa: F401
@@ -202,7 +202,14 @@ async def test_detail_riot_ids_never_use_summoner_name(store):
 
 
 async def test_history_count_clamp(store):
-    riot = LookupRiot(n_matches=60)
+    class Light(LookupRiot):
+        async def get_match(self, match_id):
+            return make_synthetic_match(match_id)
+
+        async def get_timeline(self, match_id):
+            return make_synthetic_timeline()
+
+    riot = Light(n_matches=60)
     async with Client(make_server(store, riot)) as c:
         await _register(c)
         r100 = await c.call_tool("get_match_history", {"count": 100})

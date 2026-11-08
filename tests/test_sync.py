@@ -1,9 +1,8 @@
-import copy
 from datetime import datetime
 
 import pytest
 
-from conftest import PUUID_ME, load_fixture
+from conftest import PUUID_ME, make_synthetic_match, make_synthetic_timeline
 from lol_coach_mcp.store import Store
 from lol_coach_mcp.sync import sync_matches
 
@@ -14,8 +13,6 @@ class FakeClient:
         self.id_calls = []
         self.match_calls = []
         self.timeline_calls = []
-        self._base = load_fixture("match_normal")
-        self._tl = load_fixture("timeline_normal")
 
     async def get_match_ids(self, puuid, *, queue=None, start=0, count=100, start_time=None):
         self.id_calls.append(start)
@@ -23,14 +20,11 @@ class FakeClient:
 
     async def get_match(self, match_id):
         self.match_calls.append(match_id)
-        m = copy.deepcopy(self._base)
-        m["metadata"]["matchId"] = match_id
-        m["info"]["gameCreation"] = 1_700_000_000_000 + int(match_id.split("_")[1])
-        return m
+        return make_synthetic_match(match_id)
 
     async def get_timeline(self, match_id):
         self.timeline_calls.append(match_id)
-        return copy.deepcopy(self._tl)
+        return make_synthetic_timeline()
 
 
 def make_ids(n):
