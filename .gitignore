@@ -1,0 +1,37 @@
+# secrets
+.env
+.env.*
+
+# Claude / OMC session files
+.claude/
+.omc/
+CLAUDE.md
+AGENTS.md
+docs/superpowers/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# local data
+*.sqlite
+*.sqlite3
+*.db
+reports/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# SDD workspace
+.superpowers/
