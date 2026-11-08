@@ -27,7 +27,7 @@ from lol_coach_mcp.models import (
 )
 from lol_coach_mcp.results import tool_error, tool_result
 from lol_coach_mcp.riot.client import RiotClient
-from lol_coach_mcp.riot.errors import RiotError
+from lol_coach_mcp.riot.errors import RiotError, RiotNotFound
 from lol_coach_mcp.stats import MatchStats, extract_match_stats, kda, match_tags, recent_form
 from lol_coach_mcp.store import Profile, Store
 from lol_coach_mcp.sync import sync_matches as run_sync
@@ -50,7 +50,14 @@ QUEUE_NAMES = {"RANKED_SOLO_5x5": "솔로랭크", "RANKED_FLEX_SR": "자유랭�
 PROFILE_QUEUE = 420
 MAX_HISTORY_COUNT = 50
 
-INSTRUCTIONS ="롤 개인 코칭 서버. 대화 시작 시 get_coach_context 호출"
+RIOT_DISCLAIMER = (
+    "lol-coach-mcp is not endorsed by Riot Games and does not reflect the views or opinions "
+    "of Riot Games or anyone officially involved in producing or managing Riot Games "
+    "properties. Riot Games and all associated properties are trademarks or registered "
+    "trademarks of Riot Games, Inc."
+)
+INSTRUCTIONS = f"롤 개인 코칭 서버. 대화 시작 시 get_coach_context 호출\n\n{RIOT_DISCLAIMER}"
+NOT_FOUND_MESSAGE = "해당 Riot ID를 찾을 수 없음. 이름과 태그를 확인해야 함."
 
 
 @dataclass
@@ -169,7 +176,10 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
                 account = await st.riot.get_account_by_riot_id(name, tag)
                 new_name = account.get("gameName", name)
                 new_tag = account.get("tagLine", tag)
-                if p is not None and p.puuid != account["puuid"]:
+                owner = st.store.get_meta("data_owner_puuid")
+                if (p is not None and p.puuid != account["puuid"]) or (
+                    owner is not None and owner != account["puuid"]
+                ):
                     st.store.forget_all(include_matches=True)
                     p = None
                     notice = " 이전 계정의 저장 데이터가 삭제됨."
@@ -198,6 +208,8 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             p = replace(p, **updates)
             st.store.save_profile(p)
             return tool_result(_profile_out(p), _profile_text(p) + notice)
+        except RiotNotFound:
+            return tool_error(NOT_FOUND_MESSAGE)
         except RiotError as e:
             return tool_error(str(e))
         except httpx.HTTPError:
@@ -229,6 +241,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         p = st.store.get_profile()
         if p is None:
             return tool_error(NO_PROFILE_MESSAGE)
+        count = max(1, count)
 
         async def progress(done: int, total: int, msg: str) -> None:
             await ctx.report_progress(done, total, msg)
@@ -320,15 +333,14 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         if p is None:
             return tool_error(NO_PROFILE_MESSAGE)
         count = max(1, min(count, MAX_HISTORY_COUNT))
+        try:
+            await run_sync(st.riot, st.store, p.puuid, queue=queue, limit=count, full=False)
+        except RiotError as e:
+            return tool_error(str(e))
+        except httpx.HTTPError:
+            return tool_error(NETWORK_ERROR_MESSAGE)
         stats = st.store.list_my_stats(queue=queue, limit=count, include_remakes=True)
-        if len(stats) < count:
-            try:
-                await run_sync(st.riot, st.store, p.puuid, queue=queue, limit=count, full=False)
-            except RiotError as e:
-                return tool_error(str(e))
-            except httpx.HTTPError:
-                return tool_error(NETWORK_ERROR_MESSAGE)
-            stats = st.store.list_my_stats(queue=queue, limit=count, include_remakes=True)
+        last_sync = st.store.get_meta("last_sync_at")
         rows = [
             MatchRowOut(
                 match_id=s.match_id,
@@ -346,13 +358,14 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             )
             for s in stats
         ]
-        out = MatchHistoryOut(queue_used=queue, matches=rows)
+        out = MatchHistoryOut(queue_used=queue, last_sync_at=last_sync, matches=rows)
         if not rows:
             return tool_result(out, "조회된 경기가 없음.")
         valid = [r for r in rows if r.result != "다시하기"]
         wins = sum(1 for r in valid if r.result == "승")
         remakes = len(rows) - len(valid)
         lines = [
+            f"데이터 기준: 마지막 동기화 {last_sync}.",
             f"최근 {len(rows)}경기: {wins}승 {len(valid) - wins}패"
             + (f", 다시하기 {remakes}판." if remakes else ".")
         ]
@@ -389,6 +402,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             return tool_error("이 경기에 내 계정이 참가하지 않았음. match_id를 확인해야 함.")
         if fetched:
             st.store.save_match(match_id, match, stats)
+            st.store.set_meta("data_owner_puuid", p.puuid)
         participants = match["info"]["participants"]
         me = next(x for x in participants if x["puuid"] == p.puuid)
         team_members = [x for x in participants if x["teamId"] == me["teamId"]]

@@ -225,7 +225,7 @@ async def test_history_queue_none_and_no_sync_when_enough(store):
         assert seen == [None]
         calls = riot.get_match_calls
         await c.call_tool("get_match_history", {"count": 3, "queue": None})
-    assert seen == [None] and riot.get_match_calls == calls
+    assert seen == [None, None] and riot.get_match_calls == calls
 
 
 async def test_damage_rank_tie_by_participant_order(store):
@@ -245,3 +245,16 @@ async def test_damage_rank_tie_by_participant_order(store):
     sc = r.structured_content
     assert sc["my_damage_rank_in_game"] == order.index(PUUID_ME) + 1
     assert sc["my_damage_rank_in_team"] == team.index(PUUID_ME) + 1
+
+
+async def test_history_picks_up_new_head_ids_and_reports_sync_time(store):
+    riot = LookupRiot(n_matches=3)
+    async with Client(make_server(store, riot)) as c:
+        await _register(c)
+        r1 = await c.call_tool("get_match_history", {"count": 3})
+        riot.ids = ["KR_4"] + riot.ids
+        r2 = await c.call_tool("get_match_history", {"count": 3})
+    assert r1.structured_content["last_sync_at"]
+    assert r2.structured_content["last_sync_at"]
+    assert [m["match_id"] for m in r2.structured_content["matches"]][0] == "KR_4"
+    assert "동기화" in r2.content[0].text
