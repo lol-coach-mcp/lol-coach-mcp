@@ -12,18 +12,26 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp_types import CallToolResult
 
 from lol_coach_mcp.config import Settings, load_settings
+from lol_coach_mcp import review
 from lol_coach_mcp.models import (
     CoachContextOut,
+    DeathOut,
     DetailPlayerOut,
     DetailTeamOut,
+    LaneOut,
     MasteryOut,
     MatchDetailOut,
     MatchHistoryOut,
     MatchRowOut,
+    MomentOut,
+    ObjectivesOut,
     PlayerProfileOut,
     ProfileOut,
     RankOut,
+    ReviewOut,
+    ReviewSummaryOut,
     SyncOut,
+    VisionOut,
 )
 from lol_coach_mcp.results import tool_error, tool_result
 from lol_coach_mcp.riot.client import RiotClient
@@ -49,6 +57,15 @@ KST = timezone(timedelta(hours=9))
 QUEUE_NAMES = {"RANKED_SOLO_5x5": "솔로랭크", "RANKED_FLEX_SR": "자유랭크"}
 PROFILE_QUEUE = 420
 MAX_HISTORY_COUNT = 50
+REVIEW_QUEUE = 420
+REVIEW_SYNC_LIMIT = 5
+OVERVIEW_MOMENT_LIMIT = 3
+OVERVIEW_LANE_MINUTES = (15,)
+NO_TIMELINE_NOTE = "타임라인 데이터 없음"
+NO_TIMELINE_ME_NOTE = "타임라인에 내 계정이 없음"
+NO_REVIEW_MATCH_MESSAGE = (
+    "복기할 솔로랭크 경기가 없음. 경기를 진행한 뒤 sync_matches로 동기화하거나 match_id를 지정해야 함."
+)
 
 RIOT_DISCLAIMER = (
     "lol-coach-mcp is not endorsed by Riot Games and does not reflect the views or opinions "
@@ -142,6 +159,65 @@ async def _load_match(
         st.store.save_match(match_id, match, stats)
         st.store.set_meta("data_owner_puuid", p.puuid)
     return match, stats
+
+
+def _review_text(out: ReviewOut) -> str:
+    head = f"{out.champion} {out.position} {out.result} ({out.duration}, 큐 {out.queue_id}) [{out.focus}]."
+    if out.status == "다시하기":
+        return f"{head} 다시하기 경기라 복기 대상이 아님."
+    lines = [head]
+    if out.status == "판단 보류":
+        lines.append("판단 보류: " + ", ".join(out.notes) + ".")
+    if out.summary:
+        sm = out.summary
+        lines.append(f"KDA {sm.kills}/{sm.deaths}/{sm.assists} ({sm.kda}).")
+        if sm.death_counts_by_phase is not None:
+            phases = ", ".join(f"{k} {v}" for k, v in sm.death_counts_by_phase.items())
+            lines.append(f"단계별 데스: {phases}.")
+        if sm.objective_participation_rate is not None:
+            lines.append(
+                f"오브젝트 참여율 {round(sm.objective_participation_rate * 100)}% "
+                f"(우리 팀 에픽 {sm.objective_epic_count}개)."
+            )
+    if out.lane:
+        if out.lane.status != "ok":
+            lines.append(f"라인전: {out.lane.status}.")
+        for pt in out.lane.points:
+            lines.append(
+                f"라인전 vs {out.lane.opponent_champion} {pt.minute}분: CS {pt.cs_diff:+d}, "
+                f"골드 {pt.gold_diff:+d}, 경험치 {pt.xp_diff:+d}."
+            )
+    if out.deaths is not None:
+        lines.append(f"데스 {len(out.deaths)}회.")
+        for d in out.deaths:
+            lines.append(
+                f"{d.time} {d.phase} {d.zone} 킬러 {d.killer_champion or '알 수 없음'} "
+                f"(어시스트 {d.assists})" + (f" [{', '.join(d.tags)}]" if d.tags else "")
+            )
+    if out.objectives:
+        ob = out.objectives
+        lines.append(
+            f"우리 팀 에픽 {ob.my_team_epic_count}개 중 참여 {ob.my_participation} "
+            f"({round(ob.participation_rate * 100)}%)."
+        )
+        for e in ob.events:
+            sub = f"/{e.sub_type}" if e.sub_type else ""
+            lines.append(
+                f"{e.time} {e.type}{sub} {e.team} 참여 {'O' if e.participated else 'X'}"
+                + (" 사망 상태" if e.dead_at_time else "")
+            )
+    if out.vision:
+        v = out.vision
+        placed = ", ".join(f"{k} {n}" for k, n in v.wards_placed.items())
+        lines.append(
+            f"시야 점수 {v.vision_score} ({v.per_min}/분), 와드 설치 {placed}, "
+            f"제어 와드 {v.control_wards}, 와드 제거 {v.wards_killed}."
+        )
+    if out.key_moments is not None:
+        lines.append(f"다시 볼 장면 {len(out.key_moments)}개.")
+        for m in out.key_moments:
+            lines.append(f"{m.time} {m.reason}")
+    return "\n".join(lines)
 
 
 def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPServer:
@@ -473,5 +549,119 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             f"킬 관여율 {round(out.kill_participation * 100, 1)}%."
         )
         return tool_result(out, text)
+
+    @mcp.tool()
+    async def review_match(
+        ctx: Context,
+        match_id: str | None = None,
+        focus: Literal[
+            "overview", "deaths", "lane", "objectives", "vision", "key_moments"
+        ] = "overview",
+    ) -> Annotated[CallToolResult, ReviewOut]:
+        """한 판을 타임라인 기반으로 복기함. match_id 생략 시 최근 솔로랭크 경기. focus: overview/deaths/lane/objectives/vision/key_moments."""
+        st = _state(ctx)
+        p = st.store.get_profile()
+        if p is None:
+            return tool_error(NO_PROFILE_MESSAGE)
+        try:
+            if match_id is None:
+                recent = st.store.list_my_stats(queue=REVIEW_QUEUE, limit=1)
+                if not recent:
+                    await run_sync(
+                        st.riot,
+                        st.store,
+                        p.puuid,
+                        queue=REVIEW_QUEUE,
+                        limit=REVIEW_SYNC_LIMIT,
+                        full=False,
+                    )
+                    recent = st.store.list_my_stats(queue=REVIEW_QUEUE, limit=1)
+                if not recent:
+                    return tool_error(NO_REVIEW_MATCH_MESSAGE)
+                match_id = recent[0].match_id
+            loaded = await _load_match(st, p, match_id)
+            if isinstance(loaded, CallToolResult):
+                return loaded
+            match, stats = loaded
+
+            out = ReviewOut(
+                match_id=match_id,
+                champion=stats.champion,
+                position=stats.position,
+                result=_result(stats),
+                duration=review.mmss(stats.duration_s * 1000),
+                queue_id=stats.queue_id,
+                focus=focus,
+                status="ok",
+            )
+            if stats.is_remake:
+                out.status = "다시하기"
+                out.notes = ["다시하기 경기는 복기 대상이 아님"]
+                return tool_result(out, _review_text(out))
+
+            summary = ReviewSummaryOut(
+                kills=stats.kills,
+                deaths=stats.deaths,
+                assists=stats.assists,
+                kda=kda(stats.kills, stats.deaths, stats.assists),
+            )
+            timeline = st.store.get_timeline(match_id)
+            if timeline is None:
+                try:
+                    timeline = await st.riot.get_timeline(match_id)
+                except RiotNotFound:
+                    out.notes.append(NO_TIMELINE_NOTE)
+                else:
+                    st.store.save_timeline(match_id, timeline)
+            if timeline is not None:
+                try:
+                    review.participant_id(timeline, p.puuid)
+                except ValueError:
+                    timeline = None
+                    out.notes.append(NO_TIMELINE_ME_NOTE)
+            if timeline is None:
+                out.status = "판단 보류"
+                if focus == "overview":
+                    out.summary = summary
+                return tool_result(out, _review_text(out))
+
+            if focus == "overview":
+                dcount = {ph: 0 for ph in review.PHASES}
+                for d in review.deaths(match, timeline, p.puuid):
+                    dcount[d["phase"]] += 1
+                ob = review.objectives(match, timeline, p.puuid)
+                summary.death_counts_by_phase = dcount
+                summary.objective_participation_rate = ob["participation_rate"]
+                summary.objective_epic_count = ob["my_team_epic_count"]
+                out.summary = summary
+                out.lane = LaneOut.model_validate(
+                    review.lane_checkpoints(match, timeline, p.puuid, OVERVIEW_LANE_MINUTES)
+                )
+                out.key_moments = [
+                    MomentOut.model_validate(m)
+                    for m in review.key_moments(match, timeline, p.puuid, OVERVIEW_MOMENT_LIMIT)
+                ]
+            elif focus == "lane":
+                out.lane = LaneOut.model_validate(review.lane_checkpoints(match, timeline, p.puuid))
+            elif focus == "deaths":
+                out.deaths = [
+                    DeathOut.model_validate(d) for d in review.deaths(match, timeline, p.puuid)
+                ]
+            elif focus == "objectives":
+                out.objectives = ObjectivesOut.model_validate(
+                    review.objectives(match, timeline, p.puuid)
+                )
+            elif focus == "vision":
+                out.vision = VisionOut.model_validate(review.vision(match, timeline, p.puuid))
+            else:
+                out.key_moments = [
+                    MomentOut.model_validate(m)
+                    for m in review.key_moments(match, timeline, p.puuid)
+                ]
+            return tool_result(out, _review_text(out))
+        except RiotError as e:
+            return tool_error(str(e))
+        except httpx.HTTPError:
+            return tool_error(NETWORK_ERROR_MESSAGE)
 
     return mcp
