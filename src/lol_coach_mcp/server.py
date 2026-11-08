@@ -494,7 +494,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         ]
         for r in rows:
             lines.append(
-                f"{r.played_at[:16].replace('T', ' ')} KST {r.champion} {r.position} {r.result} "
+                f"{kst_text(r.played_at)} {r.champion} {r.position} {r.result} "
                 f"{r.kills}/{r.deaths}/{r.assists} (KDA {r.kda}) CS {r.cs} ({r.cs_per_min}/분)"
                 + (f" [{', '.join(r.tags)}]" if r.tags else "")
             )
@@ -566,7 +566,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             kill_participation=stats.kill_participation,
         )
         text = (
-            f"{out.played_at[:16].replace('T', ' ')} {out.champion} {out.position} {out.result}. "
+            f"{kst_text(out.played_at)} {out.champion} {out.position} {out.result}. "
             f"{out.kills}/{out.deaths}/{out.assists} (KDA {out.kda}), CS {out.cs} ({out.cs_per_min}/분). "
             f"팀 내 딜량 {rank_team}위, 전체 {rank_game}위, 팀 딜 비중 {round(out.damage_share * 100, 1)}%, "
             f"킬 관여율 {round(out.kill_participation * 100, 1)}%."

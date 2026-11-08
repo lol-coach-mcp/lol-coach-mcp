@@ -322,3 +322,12 @@ def test_queue_label():
     assert queue_label(420) == "솔로랭크"
     assert queue_label(440) == "자유랭크"
     assert queue_label(450) == "큐 450"
+
+
+async def test_detail_text_time_is_kst(store):
+    import re
+
+    async with Client(make_server(store, LookupRiot())) as c:
+        await _register(c)
+        r = await c.call_tool("get_match_detail", {"match_id": "KR_2"})
+    assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} KST", r.content[0].text)
