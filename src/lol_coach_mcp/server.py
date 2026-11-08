@@ -265,6 +265,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             return tool_error(str(e))
         except httpx.HTTPError:
             return tool_error(NETWORK_ERROR_MESSAGE)
+        entries = [e for e in entries if e.get("queueType") in QUEUE_NAMES]
         st.store.add_rank_snapshot(entries, datetime.now(timezone.utc).isoformat())
         ranks = [
             RankOut(
@@ -296,7 +297,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             recent_form=form,
             queue_used=PROFILE_QUEUE,
         )
-        head = f"{out.riot_id} 레벨 {out.level}."
+        head = f"{out.riot_id} 레벨 {out.level}." if out.level is not None else f"{out.riot_id}."
         if ranks:
             rank_text = " ".join(
                 f"{r.queue} {r.tier} {r.division} {r.lp}LP ({r.wins}승 {r.losses}패, 승률 {r.win_rate}%)."
@@ -373,17 +374,21 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         if p is None:
             return tool_error(NO_PROFILE_MESSAGE)
         match = st.store.get_match(match_id)
-        try:
-            if match is None:
+        fetched = False
+        if match is None:
+            try:
                 match = await st.riot.get_match(match_id)
-                st.store.save_match(match_id, match, extract_match_stats(match, p.puuid))
+            except RiotError as e:
+                return tool_error(str(e))
+            except httpx.HTTPError:
+                return tool_error(NETWORK_ERROR_MESSAGE)
+            fetched = True
+        try:
             stats = extract_match_stats(match, p.puuid)
-        except RiotError as e:
-            return tool_error(str(e))
-        except httpx.HTTPError:
-            return tool_error(NETWORK_ERROR_MESSAGE)
         except ValueError:
             return tool_error("이 경기에 내 계정이 참가하지 않았음. match_id를 확인해야 함.")
+        if fetched:
+            st.store.save_match(match_id, match, stats)
         participants = match["info"]["participants"]
         me = next(x for x in participants if x["puuid"] == p.puuid)
         team_members = [x for x in participants if x["teamId"] == me["teamId"]]
@@ -399,7 +404,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
                             riot_id=(
                                 f"{x['riotIdGameName']}#{x.get('riotIdTagline', '')}"
                                 if x.get("riotIdGameName")
-                                else x.get("summonerName", "")
+                                else "알 수 없음"
                             ),
                             champion=x["championName"],
                             position=x.get("teamPosition") or "UNKNOWN",

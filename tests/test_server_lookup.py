@@ -1,5 +1,7 @@
 import copy
 
+import httpx
+
 import pytest
 from mcp import Client
 
@@ -121,3 +123,125 @@ async def test_lookup_requires_profile(store):
         ]:
             r = await c.call_tool(name, args)
             assert r.is_error and "my_profile" in r.content[0].text
+
+
+async def test_snapshot_excludes_premade(store):
+    async with Client(make_server(store, LookupRiot())) as c:
+        await _register(c)
+        await c.call_tool("get_profile", {})
+    _, entries = store.latest_rank_snapshot()
+    assert {e["queueType"] for e in entries} == {"RANKED_SOLO_5x5", "RANKED_FLEX_SR"}
+
+
+async def test_profile_level_missing_omits_level(store):
+    class NoLevel(LookupRiot):
+        async def get_summoner(self, puuid):
+            return {}
+
+    async with Client(make_server(store, NoLevel())) as c:
+        await _register(c)
+        r = await c.call_tool("get_profile", {})
+    assert not r.is_error
+    assert "None" not in r.content[0].text
+
+
+async def test_profile_riot_error_and_network_error(store):
+    from lol_coach_mcp.riot.errors import RiotAuthError
+
+    class Auth(LookupRiot):
+        async def get_league_entries(self, puuid):
+            raise RiotAuthError()
+
+    class Net(LookupRiot):
+        async def get_summoner(self, puuid):
+            raise httpx.ConnectTimeout("t")
+
+    async with Client(make_server(store, Auth())) as c:
+        await _register(c)
+        r = await c.call_tool("get_profile", {})
+    assert r.is_error and "API 키" in r.content[0].text
+    async with Client(make_server(store, Net())) as c:
+        r = await c.call_tool("get_profile", {})
+    assert r.is_error and "네트워크" in r.content[0].text
+
+
+async def test_detail_not_participant(store):
+    class Other(LookupRiot):
+        async def get_match(self, match_id):
+            m = await super().get_match(match_id)
+            for p in m["info"]["participants"]:
+                if p["puuid"] == PUUID_ME:
+                    p["puuid"] = "puuid-zzz"
+            return m
+
+    async with Client(make_server(store, Other())) as c:
+        await _register(c)
+        r = await c.call_tool("get_match_detail", {"match_id": "KR_1"})
+    assert r.is_error and "참가하지 않았음" in r.content[0].text
+    assert not store.has_match("KR_1")
+
+
+async def test_detail_riot_ids_never_use_summoner_name(store):
+    class NoRiotId(LookupRiot):
+        async def get_match(self, match_id):
+            m = await super().get_match(match_id)
+            for p in m["info"]["participants"]:
+                if p["puuid"] != PUUID_ME:
+                    p.pop("riotIdGameName", None)
+                    p["summonerName"] = "옛이름"
+            return m
+
+    async with Client(make_server(store, NoRiotId())) as c:
+        await _register(c)
+        r = await c.call_tool("get_match_detail", {"match_id": "KR_1"})
+    ids = [p["riot_id"] for t in r.structured_content["teams"] for p in t["players"]]
+    assert "옛이름" not in ids and "알 수 없음" in ids
+
+
+async def test_history_count_clamp(store):
+    riot = LookupRiot(n_matches=60)
+    async with Client(make_server(store, riot)) as c:
+        await _register(c)
+        r100 = await c.call_tool("get_match_history", {"count": 100})
+        r0 = await c.call_tool("get_match_history", {"count": 0})
+    assert len(r0.structured_content["matches"]) == 1
+    assert len(r100.structured_content["matches"]) == 50
+
+
+async def test_history_queue_none_and_no_sync_when_enough(store):
+    riot = LookupRiot()
+    seen = []
+    orig = riot.get_match_ids
+
+    async def spy(puuid, **kw):
+        seen.append(kw.get("queue", "missing"))
+        return await orig(puuid, **kw)
+
+    riot.get_match_ids = spy
+    async with Client(make_server(store, riot)) as c:
+        await _register(c)
+        r = await c.call_tool("get_match_history", {"count": 3, "queue": None})
+        assert r.structured_content["queue_used"] is None
+        assert seen == [None]
+        calls = riot.get_match_calls
+        await c.call_tool("get_match_history", {"count": 3, "queue": None})
+    assert seen == [None] and riot.get_match_calls == calls
+
+
+async def test_damage_rank_tie_by_participant_order(store):
+    class Tie(LookupRiot):
+        async def get_match(self, match_id):
+            m = await super().get_match(match_id)
+            for p in m["info"]["participants"]:
+                p["totalDamageDealtToChampions"] = 1000
+            return m
+
+    async with Client(make_server(store, Tie())) as c:
+        await _register(c)
+        r = await c.call_tool("get_match_detail", {"match_id": "KR_1"})
+    parts = load_fixture("match_normal")["info"]["participants"]
+    order = [p["puuid"] for p in parts]
+    team = [p["puuid"] for p in parts if p["teamId"] == 200]
+    sc = r.structured_content
+    assert sc["my_damage_rank_in_game"] == order.index(PUUID_ME) + 1
+    assert sc["my_damage_rank_in_team"] == team.index(PUUID_ME) + 1
