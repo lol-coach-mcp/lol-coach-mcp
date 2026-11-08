@@ -12,7 +12,7 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp_types import CallToolResult
 
 from lol_coach_mcp.config import Settings, load_settings
-from lol_coach_mcp import analysis, form, periods, review, splits
+from lol_coach_mcp import analysis, form, habits, periods, review, splits
 from lol_coach_mcp.models import (
     CoachContextOut,
     DeathOut,
@@ -20,6 +20,7 @@ from lol_coach_mcp.models import (
     DetailTeamOut,
     DuoPartnerOut,
     FormOut,
+    HabitsOut,
     LaneOut,
     MasteryOut,
     MatchDetailOut,
@@ -76,6 +77,8 @@ NO_REVIEW_MATCH_MESSAGE = (
 FORM_DEFAULT_COUNT = 20
 ANALYSIS_MAX_COUNT = 100
 SPLITS_DEFAULT_COUNT = 30
+HABITS_DEFAULT_COUNT = 30
+HABITS_BACKFILL_LIMIT = 10
 NOTE_NO_RANK_INFO = "현재 티어를 확인하지 못함"
 SOLO_QUEUE_TYPE = "RANKED_SOLO_5x5"
 
@@ -348,6 +351,58 @@ def _splits_text(out: SplitsOut) -> str:
             "듀오 파트너 후보: "
             + ", ".join(f"{d.riot_id}({d.games_together}판)" for d in out.duo_partners)
             + "."
+        )
+    return "\n".join(lines)
+
+
+def _pct(v: float | None) -> str:
+    return "없음" if v is None else f"{v * 100:.1f}%"
+
+
+def _habits_text(out: HabitsOut) -> str:
+    lines = [
+        f"{out.period_desc}, {queue_label(out.queue)}, 전체 {out.games_total}판 중 타임라인 있는 "
+        f"{out.games_with_timeline}판 사용, 데스 {out.deaths_total}회. 상태: {out.status}.",
+        *[n + "." for n in out.notes],
+    ]
+    if out.games_with_timeline:
+        lines.append(
+            "데스 시간대: "
+            + ", ".join(f"{b['bucket']} {b['deaths']}회" for b in out.death_time_buckets)
+        )
+        lines.append(
+            "데스 구역 상위: "
+            + (", ".join(f"{z['zone']} {z['deaths']}회" for z in out.top_death_zones) or "없음")
+        )
+        lines.append(
+            f"오브젝트 직전 데스 {out.pre_objective_deaths}/{out.deaths_total}회 "
+            f"({_pct(out.pre_objective_death_rate)})"
+        )
+        lines.append(
+            f"연속 데스 발생 {out.consecutive_death_games}/{out.games_with_timeline}판 "
+            f"({_pct(out.consecutive_death_game_rate)})"
+        )
+        fb = out.first_back_avg
+        lines.append(
+            "첫 귀환 평균: "
+            + ("없음" if fb is None else f"{fb['time']}({fb['seconds']}초, {fb['games']}판)")
+        )
+        lines.append(
+            f"솔로킬 당한 데스 {out.solo_deaths}/{out.deaths_total}회 ({_pct(out.solo_death_rate)})"
+        )
+    wc = out.win_compare
+    if wc.get("status") == habits.STATUS_OK:
+        d = wc["diff_win_minus_all"]
+        lines.append(
+            f"승리 {wc['wins']}판 vs 전체 차이(승리-전체): 판당 데스 {d['deaths_per_game']}, "
+            f"오브젝트 직전 데스율 {d['pre_objective_death_rate']}, "
+            f"연속 데스 판 비율 {d['consecutive_death_game_rate']}, "
+            f"첫 귀환 초 {d['first_back_avg_s']}, 솔로킬 비율 {d['solo_death_rate']}"
+        )
+    else:
+        lines.append(
+            f"승리 판 비교: 판단 보류(승리 {wc.get('wins', 0)}판, 패배 {wc.get('losses', 0)}판, "
+            f"각 {habits.MIN_WIN_COMPARE_GAMES}판 이상 필요)"
         )
     return "\n".join(lines)
 
@@ -878,5 +933,77 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             notes=sync_notes + built["notes"],
         )
         return tool_result(out, _splits_text(out))
+
+    @mcp.tool()
+    async def find_habits(
+        ctx: Context,
+        period: Literal["recent_n", "session", "week", "month", "season"] = "recent_n",
+        count: int = HABITS_DEFAULT_COUNT,
+        queue: int | None = 420,
+    ) -> Annotated[CallToolResult, HabitsOut]:
+        """타임라인이 있는 경기에서 반복 습관을 탐지함: 데스 시간대(5분 구간)·구역 상위 3, 오브젝트 직전 데스 비율, 연속 데스 발생 판 비율, 첫 귀환 시각 평균, 솔로킬 당한 비율, 승리 판과의 차이(승·패 각 3판 이상일 때). 사용 판수·횟수를 함께 표시하며 타임라인 5판 미만이면 판단 보류. 타임라인 없는 경기는 호출당 최대 10판까지 보충 수집하고, 매번 새 경기를 동기화하며 실패하면 저장된 데이터 기준으로 응답함."""
+        st = _state(ctx)
+        p = st.store.get_profile()
+        if p is None:
+            return tool_error(NO_PROFILE_MESSAGE)
+        count = max(1, min(count, ANALYSIS_MAX_COUNT))
+        sync_notes = await _sync_for_analysis(st, p, queue, count)
+        if isinstance(sync_notes, CallToolResult):
+            return sync_notes
+        stats = st.store.list_my_stats(queue=queue, include_remakes=True)
+        picked, period_desc = periods.select(stats, period, count)
+        notes = list(sync_notes)
+        try:
+            missing = [s.match_id for s in picked if st.store.get_timeline(s.match_id) is None]
+            to_fetch = [m for m in missing if st.store.has_match(m)][:HABITS_BACKFILL_LIMIT]
+            skipped_404 = 0
+            for i, mid in enumerate(to_fetch):
+                await ctx.report_progress(i, len(to_fetch), f"타임라인 수집 {i + 1}/{len(to_fetch)}")
+                try:
+                    tl = await st.riot.get_timeline(mid)
+                except RiotNotFound:
+                    skipped_404 += 1
+                    continue
+                st.store.save_timeline(mid, tl)
+            if to_fetch:
+                await ctx.report_progress(len(to_fetch), len(to_fetch), "타임라인 수집 완료")
+        except RiotError as e:
+            return tool_error(str(e))
+        except httpx.HTTPError:
+            return tool_error(NETWORK_ERROR_MESSAGE)
+        if to_fetch:
+            notes.append(f"타임라인 {len(to_fetch) - skipped_404}판 새로 수집")
+        if skipped_404:
+            notes.append(f"타임라인이 없는 경기 {skipped_404}판 제외")
+        remaining = len(missing) - len(to_fetch)
+        if remaining > 0:
+            notes.append(
+                f"타임라인 미수집 {remaining}판 남음(호출당 최대 {HABITS_BACKFILL_LIMIT}판 수집)"
+            )
+
+        games: list[tuple[dict, dict]] = []
+        no_me = 0
+        for s in picked:
+            tl = st.store.get_timeline(s.match_id)
+            match = st.store.get_match(s.match_id)
+            if tl is None or match is None:
+                continue
+            try:
+                review.participant_id(tl, p.puuid)
+            except ValueError:
+                no_me += 1
+                continue
+            games.append((match, tl))
+        if no_me:
+            notes.append(f"타임라인에 내 계정이 없어 제외된 경기 {no_me}판")
+        built = habits.detect_habits(games, p.puuid)
+        out = HabitsOut(
+            period_desc=period_desc,
+            queue=queue,
+            games_total=len(picked),
+            notes=notes,
+            **built,
+        )
+        return tool_result(out, _habits_text(out))
 
     return mcp

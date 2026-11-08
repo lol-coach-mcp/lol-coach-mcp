@@ -247,3 +247,23 @@ class SplitsOut(BaseModel):
     rows: list[dict] = []
     duo_partners: list[DuoPartnerOut] = []
     notes: list[str] = []
+
+
+class HabitsOut(BaseModel):
+    period_desc: str
+    queue: int | None = None
+    games_total: int
+    games_with_timeline: int
+    deaths_total: int
+    death_time_buckets: list[dict]
+    top_death_zones: list[dict]
+    pre_objective_deaths: int
+    pre_objective_death_rate: float | None = None
+    consecutive_death_games: int
+    consecutive_death_game_rate: float | None = None
+    first_back_avg: dict | None = None
+    solo_deaths: int
+    solo_death_rate: float | None = None
+    win_compare: dict
+    status: str
+    notes: list[str] = []
