@@ -14,6 +14,10 @@ MIN_SAMPLES = 30  # 티어×포지션 표본이 이보다 적으면 기준선 �
 SOURCE_USER = "사용자 수집"
 SOURCE_DIST = "배포"
 EXPORT_NOTE = "티어 라벨은 시드 기준 근사"
+EXPORT_NOTES = [
+    "참가자 10명을 표본으로 사용(같은 경기 내 상관 있음)",
+    "승률 기준선은 정의상 약 0.5",
+]
 EXPORT_DECIMALS = 4
 
 
@@ -65,6 +69,7 @@ def export_baselines(store: Store, out_path: Path) -> int:
             "collected_at": max(r["collected_at"] for r in rows if r["collected_at"]),
             "patch": _mode([r["patch"] for r in rows if r["patch"]]),
             "note": EXPORT_NOTE,
+            "notes": EXPORT_NOTES,
         },
         "rows": exported,
     }

@@ -599,10 +599,12 @@ class Store:
     def forget_all(self, include_matches: bool = False) -> None:
         tables = ["profile", "rank_snapshots", *MEMORY_TABLES]
         if include_matches:
-            tables += ["matches", "timelines", "my_match_stats", "meta"]
+            tables += ["matches", "timelines", "my_match_stats"]
         with self._conn:
             for t in tables:
                 self._conn.execute(f"DELETE FROM {t}")  # 고정 테이블명, 사용자 입력 아님
-            if not include_matches:
-                # 데이터 소유자 표시는 남겨 다른 계정 등록 시 오염을 막음
-                self._conn.execute("DELETE FROM meta WHERE key <> 'data_owner_puuid'")
+            # 기준선 솔트는 항상 유지(재개 시 중복 제외 해시가 깨지지 않도록).
+            # 데이터 소유자 표시는 include_matches가 아닐 때 남겨 다른 계정 등록 시 오염을 막음
+            keep = ("baseline_salt",) if include_matches else ("baseline_salt", "data_owner_puuid")
+            self._conn.execute(
+                f"DELETE FROM meta WHERE key NOT IN ({', '.join('?' for _ in keep)})", keep)

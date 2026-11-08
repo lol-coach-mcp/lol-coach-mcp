@@ -11,7 +11,7 @@ from typing import Any
 
 from lol_coach_mcp.baseline.builder import build_baselines, export_baselines
 from lol_coach_mcp.baseline.collector import ALL_TIERS, DIVISION_TIERS, QUEUE_NAMES, collect
-from lol_coach_mcp.config import ConfigError, Settings, load_settings
+from lol_coach_mcp.config import ConfigError, Settings, load_data_dir, load_settings
 from lol_coach_mcp.riot.client import RiotClient
 from lol_coach_mcp.riot.errors import RiotAuthError, RiotError
 from lol_coach_mcp.store import Store
@@ -75,11 +75,15 @@ def main(
 ) -> int:
     args = _parser().parse_args(argv)
     try:
-        settings = settings or load_settings()
+        if args.command == "collect":
+            settings = settings or load_settings()  # collect만 API 키가 필요함
+            data_dir = settings.data_dir
+        else:
+            data_dir = settings.data_dir if settings else load_data_dir()
     except ConfigError as e:
         _err(str(e))
         return EXIT_ERROR
-    store = Store(settings.data_dir / DB_NAME)
+    store = Store(data_dir / DB_NAME)
     try:
         if args.command == "collect":
             return asyncio.run(_run_collect(args, settings, store, client_factory))

@@ -30,6 +30,8 @@ QUEUE_NAMES = {420: "RANKED_SOLO_5x5"}
 STATUS_DONE = "done"
 STATUS_EXHAUSTED = "exhausted"
 STATUS_INTERRUPTED = "interrupted"
+STATUS_ABORTED = "aborted"
+MAX_CONSECUTIVE_FAILURES = 20  # 연속 이만큼 실패하면 해당 티어 수집을 중단
 
 Progress = Callable[[str], None]
 
@@ -104,6 +106,14 @@ async def _collect_tier(
 
     save()
     status = STATUS_INTERRUPTED
+    failures = 0  # 연속 RiotError/HTTP 실패 수(성공하면 0으로 돌아감)
+
+    def too_many_failures() -> bool:
+        if failures < MAX_CONSECUTIVE_FAILURES:
+            return False
+        progress(f"[{tier}] 연속 {MAX_CONSECUTIVE_FAILURES}회 호출 실패로 티어 수집을 중단함. "
+                 "진행 상태는 저장됨(--resume으로 재시도 가능)")
+        return True
     try:
         if matches >= target:
             status = STATUS_DONE
@@ -117,6 +127,10 @@ async def _collect_tier(
             except RiotAuthError:
                 raise
             except (RiotError, httpx.HTTPError):
+                failures += 1
+                if too_many_failures():
+                    status = STATUS_ABORTED
+                    return
                 continue
             complete = True
             for match_id in ids:
@@ -130,7 +144,13 @@ async def _collect_tier(
                 except RiotAuthError:
                     raise
                 except (RiotError, httpx.HTTPError):
+                    complete = False  # 시드를 완료 처리하지 않아 재개 시 다시 시도
+                    failures += 1
+                    if too_many_failures():
+                        status = STATUS_ABORTED
+                        return
                     continue
+                failures = 0
                 samples = samples_from_match(match, queue)
                 if not samples:
                     store.baseline_mark_seen("skip", match_id, tier)
@@ -175,6 +195,9 @@ async def collect(
     result: dict[str, int] = {}
     for tier in tiers:
         if not resume:
+            old_m, old_s = store.baseline_match_count(tier), store.baseline_sample_count(tier)
+            if old_m or old_s:
+                progress(f"[{tier}] --resume 없이 시작해 기존 진행({old_m}경기, 표본 {old_s}개)을 폐기함")
             store.reset_baseline_tier(tier)
         progress(f"[{tier}] 수집 시작(목표 {matches_per_tier}경기)")
         await _collect_tier(client, store, tier, target=matches_per_tier, queue=queue,

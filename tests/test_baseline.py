@@ -8,9 +8,9 @@ import pytest
 from lol_coach_mcp.analysis import METRICS
 from lol_coach_mcp.baseline import cli
 from lol_coach_mcp.baseline.builder import MIN_SAMPLES, build_baselines, export_baselines
-from lol_coach_mcp.baseline.collector import collect
+from lol_coach_mcp.baseline.collector import MAX_CONSECUTIVE_FAILURES, collect
 from lol_coach_mcp.config import Settings
-from lol_coach_mcp.riot.errors import RiotAuthError
+from lol_coach_mcp.riot.errors import RiotAuthError, RiotServerError
 from lol_coach_mcp.store import BASELINE_METRIC_COLUMNS, Store
 
 POSITIONS = ("TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY")
@@ -39,7 +39,10 @@ class FakeClient:
     """네트워크 없는 RiotClient 대역. 인접 시드는 매치 1건을 공유함."""
 
     def __init__(self, seeds: dict[tuple, int] | None = None, apex: dict[str, int] | None = None,
-                 fail_after_matches: int | None = None, special: dict | None = None) -> None:
+                 fail_after_matches: int | None = None, special: dict | None = None,
+                 broken_matches: set | None = None, all_fail: bool = False) -> None:
+        self.broken = broken_matches or set()
+        self.all_fail = all_fail
         self.seeds = seeds if seeds is not None else {("GOLD", "I", 1): 12}
         self.apex = apex or {}
         self.fail_after = fail_after_matches
@@ -63,6 +66,8 @@ class FakeClient:
     async def get_match(self, match_id):
         if self.fail_after is not None and len(self.fetched) >= self.fail_after:
             raise RiotAuthError()
+        if self.all_fail or match_id in self.broken:
+            raise RiotServerError("boom")
         self.fetched.append(match_id)
         return make_match(match_id, **self.special.get(match_id, {}))
 
@@ -250,7 +255,9 @@ async def test_export_has_no_identifiers_and_has_metadata(store, tmp_path):
         assert not re.search(pat, text), pat
     data = json.loads(text)
     assert data["metadata"] == {"source": "배포", "collected_at": "2026-11-09T01:00:00+09:00",
-                                "patch": "16.21", "note": "티어 라벨은 시드 기준 근사"}
+                                "patch": "16.21", "note": "티어 라벨은 시드 기준 근사",
+                                "notes": ["참가자 10명을 표본으로 사용(같은 경기 내 상관 있음)",
+                                          "승률 기준선은 정의상 약 0.5"]}
     assert data["rows"] and all(r["source"] == "배포" for r in data["rows"])
     assert {"tier", "position", "champion", "metric", "mean", "std", "n", "patch",
             "collected_at", "source"} == set(data["rows"][0])
@@ -301,3 +308,57 @@ def test_cli_rejects_unknown_tier(settings, capsys):
     assert cli.main(["collect", "--tiers", "WOOD"], settings=settings,
                     client_factory=lambda s: FakeClient()) == 1
     assert "WOOD" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("include_matches", [False, True])
+async def test_resume_survives_forget_all(store, include_matches):
+    first = FakeClient(fail_after_matches=2)
+    with pytest.raises(RiotAuthError):
+        await run(first, store)
+    salt = store.get_meta("baseline_salt")
+    assert salt
+    store.forget_all(include_matches=include_matches)
+    assert store.get_meta("baseline_salt") == salt
+    second = FakeClient()
+    await run(second, store, resume=True)
+    assert store.baseline_match_count("GOLD") == 4
+    assert store.baseline_sample_count("GOLD") == 40
+    assert not set(first.fetched) & set(second.fetched)
+
+
+async def test_non_resume_reports_discarded_progress(store):
+    await run(FakeClient(), store)
+    msgs = []
+    await run(FakeClient(), store, progress=msgs.append)
+    assert any("4경기" in m and "40" in m and "폐기" in m for m in msgs)
+
+
+async def test_failed_match_fetch_leaves_seed_incomplete_for_resume(store):
+    c = FakeClient(seeds={("GOLD", "I", 1): 1}, broken_matches={"KR_0000000002"})
+    await run(c, store, matches_per_tier=50)
+    assert store.baseline_match_count("GOLD") == 2  # 1, 3
+    assert not store.baseline_seen("seed", "seed-GOLD-I-1-0")
+    c2 = FakeClient(seeds={("GOLD", "I", 1): 1})
+    await run(c2, store, matches_per_tier=50, resume=True)
+    assert c2.fetched == ["KR_0000000002"]
+    assert store.baseline_match_count("GOLD") == 3
+
+
+async def test_aborts_tier_after_consecutive_failures(store):
+    c = FakeClient(seeds={("GOLD", "I", 1): 30}, all_fail=True)
+    msgs = []
+    await run(c, store, matches_per_tier=50, progress=msgs.append)
+    assert store.get_baseline_job("GOLD")["status"] == "aborted"
+    assert any("연속" in m and str(MAX_CONSECUTIVE_FAILURES) in m for m in msgs)
+
+
+def test_cli_build_and_export_do_not_need_api_key(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("RIOT_API_KEY", raising=False)
+    monkeypatch.setenv("LOL_COACH_DATA_DIR", str(tmp_path))
+    monkeypatch.chdir(tmp_path)  # .env 없음
+    assert cli.main(["build"]) == 0
+    assert cli.main(["export", "--out", str(tmp_path / "x.json")]) == 1  # 행 없음이지 키 오류가 아님
+    err = capsys.readouterr().err
+    assert "RIOT_API_KEY" not in err and "내보낼 기준선" in err
+    assert cli.main(["collect", "--tiers", "GOLD"]) == 1
+    assert "RIOT_API_KEY" in capsys.readouterr().err

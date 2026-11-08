@@ -33,6 +33,18 @@ def _default_data_dir() -> Path:
     return Path.home() / ".local" / "share" / "lol-coach-mcp"
 
 
+def load_data_dir(
+    env: Mapping[str, str] | None = None,
+    dotenv_path: Path | None = None,
+) -> Path:
+    """API 키 없이 데이터 디렉터리만 읽음(키가 필요 없는 CLI 하위 명령용)."""
+    env_map: Mapping[str, str] = os.environ if env is None else env
+    path = dotenv_path if dotenv_path is not None else Path.cwd() / ".env"
+    file_map: Mapping[str, str | None] = dotenv_values(path) if path.is_file() else {}
+    raw = env_map.get("LOL_COACH_DATA_DIR") or file_map.get("LOL_COACH_DATA_DIR")
+    return Path(raw.strip()) if raw and raw.strip() else _default_data_dir()
+
+
 def load_settings(
     env: Mapping[str, str] | None = None,
     dotenv_path: Path | None = None,
