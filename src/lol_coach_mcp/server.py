@@ -18,6 +18,7 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ResourceError
 from mcp_types import CallToolResult
 
+from lol_coach_mcp.baseline import loader as baseline_loader
 from lol_coach_mcp.config import Settings, load_settings
 from lol_coach_mcp import (
     analysis, builds, champions, explain as explain_mod, form, goals as goals_mod, habits,
@@ -128,6 +129,7 @@ class AppState:
 def _default_state() -> AppState:
     settings = load_settings()
     store = Store(settings.data_dir / "lol-coach.sqlite3")
+    baseline_loader.load_distributed_baselines(store, baseline_loader.read_packaged_baselines())
     http = httpx.AsyncClient(timeout=10.0)
     return AppState(
         settings=settings,

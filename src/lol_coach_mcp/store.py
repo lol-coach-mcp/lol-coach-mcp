@@ -12,7 +12,7 @@ from typing import Any
 
 from lol_coach_mcp.stats import MatchStats
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 TONES = ("직설", "격려", "데이터만")
 DETAIL_LEVELS = ("초보", "보통", "숙련")
@@ -156,6 +156,31 @@ CREATE TABLE IF NOT EXISTS baseline_seen (
 );
 """
 
+# 출처별로 같은 키의 기준선을 함께 보관(PK에 source 포함). 조회 시 사용자 수집이 우선
+_SCHEMA_V6 = """
+CREATE TABLE baselines_v6 (
+    tier TEXT NOT NULL,
+    position TEXT NOT NULL,
+    champion TEXT NOT NULL DEFAULT '',
+    metric TEXT NOT NULL,
+    mean REAL NOT NULL,
+    std REAL,
+    n INTEGER,
+    patch TEXT,
+    collected_at TEXT,
+    source TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (tier, position, champion, metric, source)
+);
+INSERT INTO baselines_v6 (tier, position, champion, metric, mean, std, n, patch, collected_at, source)
+    SELECT tier, position, champion, metric, mean, std, n, patch, collected_at, COALESCE(source, '')
+    FROM baselines;
+DROP TABLE baselines;
+ALTER TABLE baselines_v6 RENAME TO baselines;
+"""
+
+SOURCE_USER = "사용자 수집"  # 기준선 출처: 직접 수집(배포보다 우선)
+SOURCE_DIST = "배포"  # 기준선 출처: 패키지에 포함된 배포 파일
+
 GOAL_STATUSES = ("진행 중", "달성", "미달", "종료")
 _GOAL_UPDATABLE = ("status", "closed_at", "target", "games_to_track")
 MEMORY_TABLES = ("coach_findings", "goals", "journal")
@@ -163,6 +188,7 @@ MEMORY_TABLES = ("coach_findings", "goals", "journal")
 # (도달 버전, 스크립트) — 낮은 버전부터 차례로 적용
 _MIGRATIONS = (
     (1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4), (5, _SCHEMA_V5),
+    (6, _SCHEMA_V6),
 )
 
 
@@ -315,15 +341,16 @@ class Store:
     ) -> dict | None:
         row = self._conn.execute(
             "SELECT mean, std, n, patch, collected_at, source FROM baselines "
-            "WHERE tier = ? AND position = ? AND champion = ? AND metric = ?",
-            (tier, position, champion or "", metric),
+            "WHERE tier = ? AND position = ? AND champion = ? AND metric = ? "
+            "ORDER BY (source = ?) DESC, collected_at DESC LIMIT 1",
+            (tier, position, champion or "", metric, SOURCE_USER),
         ).fetchone()
         return dict(row) if row else None
 
     def baseline_summary(self) -> dict | None:
         """저장된 기준선 요약 (티어·포지션별 지표 수, 출처, 패치, 수집일 범위). 없으면 None."""
         groups = self._conn.execute(
-            "SELECT tier, position, COUNT(*) AS metrics, MIN(n) AS min_n FROM baselines "
+            "SELECT tier, position, COUNT(DISTINCT metric) AS metrics, MIN(n) AS min_n FROM baselines "
             "GROUP BY tier, position ORDER BY tier, position"
         ).fetchall()
         if not groups:
@@ -355,7 +382,7 @@ class Store:
                 [
                     (r["tier"], r["position"], r.get("champion") or "", r["metric"], r["mean"],
                      r.get("std"), r.get("n"), r.get("patch"), r.get("collected_at"),
-                     r.get("source"))
+                     r.get("source") or "")
                     for r in rows
                 ],
             )

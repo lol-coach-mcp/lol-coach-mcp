@@ -8,11 +8,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from lol_coach_mcp.analysis import METRICS, summary
-from lol_coach_mcp.store import Store
+from lol_coach_mcp.store import SOURCE_DIST, SOURCE_USER, Store
 
 MIN_SAMPLES = 30  # 티어×포지션 표본이 이보다 적으면 기준선 행을 만들지 않음
-SOURCE_USER = "사용자 수집"
-SOURCE_DIST = "배포"
 EXPORT_NOTE = "티어 라벨은 시드 기준 근사"
 EXPORT_NOTES = [
     "참가자 10명을 표본으로 사용(같은 경기 내 상관 있음)",

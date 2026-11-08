@@ -106,7 +106,7 @@ async def _collect_tier(
 
     save()
     status = STATUS_INTERRUPTED
-    failures = 0  # 연속 RiotError/HTTP 실패 수(성공하면 0으로 돌아감)
+    failures = 0  # 연속 RiotError/HTTP 실패 수(id 조회든 매치 조회든 Riot 호출이 성공하면 0으로 돌아감)
 
     def too_many_failures() -> bool:
         if failures < MAX_CONSECUTIVE_FAILURES:
@@ -132,6 +132,7 @@ async def _collect_tier(
                     status = STATUS_ABORTED
                     return
                 continue
+            failures = 0
             complete = True
             for match_id in ids:
                 if matches >= target:

@@ -170,7 +170,7 @@ def test_migrates_v1_db_in_place(tmp_path):
         s.close()
     conn = sqlite3.connect(str(path))
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == store_mod.SCHEMA_VERSION == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == store_mod.SCHEMA_VERSION == 6
     finally:
         conn.close()
 
@@ -205,7 +205,7 @@ def test_migrates_v2_db_in_place_adds_caches(tmp_path):
         s.close()
     conn = sqlite3.connect(str(path))
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
     finally:
         conn.close()
 
@@ -278,7 +278,7 @@ def test_migrates_v3_db_in_place_adds_memory_tables(tmp_path):
         s.close()
     conn = sqlite3.connect(str(path))
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
         names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"coach_findings", "goals", "journal"} <= names
     finally:

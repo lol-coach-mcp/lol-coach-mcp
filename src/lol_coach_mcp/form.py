@@ -17,6 +17,18 @@ NOTE_NO_WINS = "분석 기간에 승리 판이 없어 승리 판과 비교할 �
 BaselineGetter = Callable[[str, str, str], dict | None]
 
 
+def _baseline_source(base: dict | None, default: str, tier: str, position: str) -> str:
+    """행별 기준 출처 문구: 출처(배포/사용자 수집), 티어·포지션, 패치, 표본 수. 출처를 모르면 기본 문구."""
+    if not base or not base.get("source"):
+        return default
+    parts = [f"{tier} {position}"]
+    if base.get("patch"):
+        parts.append(f"패치 {base['patch']}")
+    if base.get("n") is not None:
+        parts.append(f"n={base['n']}")
+    return f"{base['source']} 기준선 ({', '.join(parts)})"
+
+
 def _best_self_rows(mine: list[MatchStats]) -> tuple[list[analysis.EvidenceRow], list[str]]:
     """같은 포지션 승리 판을 기준으로 비교. win 지표는 기준 자체가 1.0이라 제외함."""
     wins = [s for s in mine if s.win]
@@ -90,7 +102,8 @@ def build_form(
         for m in analysis.METRICS:
             base = get_baseline(tier, position, m)
             found += base is not None
-            rows.append(analysis.compare_metric(m, series[m], base, ref_source, position))
+            rows.append(analysis.compare_metric(
+                m, series[m], base, _baseline_source(base, ref_source, tier, position), position))
         if found == 0:
             best_rows, extra = _best_self_rows(mine)
             notes += extra

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from lol_coach_mcp.baseline.builder import build_baselines, export_baselines
-from lol_coach_mcp.baseline.collector import ALL_TIERS, DIVISION_TIERS, QUEUE_NAMES, collect
+from lol_coach_mcp.baseline.collector import ALL_TIERS, STATUS_ABORTED, DIVISION_TIERS, QUEUE_NAMES, collect
 from lol_coach_mcp.config import ConfigError, Settings, load_data_dir, load_settings
 from lol_coach_mcp.riot.client import RiotClient
 from lol_coach_mcp.riot.errors import RiotAuthError, RiotError
@@ -19,7 +19,7 @@ from lol_coach_mcp.store import Store
 DB_NAME = "lol-coach.sqlite3"
 DEFAULT_MATCHES_PER_TIER = 60
 DEFAULT_EXPORT_PATH = "src/lol_coach_mcp/data/baselines.json"
-EXIT_OK, EXIT_ERROR, EXIT_AUTH = 0, 1, 2
+EXIT_OK, EXIT_ERROR, EXIT_AUTH, EXIT_ABORTED = 0, 1, 2, 3
 
 
 def _err(msg: str) -> None:
@@ -63,6 +63,12 @@ async def _run_collect(args: argparse.Namespace, settings: Settings, store: Stor
         aclose = getattr(client, "aclose", None)
         if aclose is not None:
             await aclose()
+    aborted = [t for t in tiers
+               if (store.get_baseline_job(t) or {}).get("status") == STATUS_ABORTED]
+    if aborted:
+        _err(f"일부 티어 수집 중단: {', '.join(aborted)}. 연속 호출 실패로 중단됨. "
+             "진행 상태는 저장됨. --resume으로 이어서 수집할 수 있음.")
+        return EXIT_ABORTED
     _err("수집 완료")
     return EXIT_OK
 

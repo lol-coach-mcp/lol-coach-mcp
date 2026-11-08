@@ -40,7 +40,10 @@ class FakeClient:
 
     def __init__(self, seeds: dict[tuple, int] | None = None, apex: dict[str, int] | None = None,
                  fail_after_matches: int | None = None, special: dict | None = None,
-                 broken_matches: set | None = None, all_fail: bool = False) -> None:
+                 broken_matches: set | None = None, all_fail: bool = False,
+                 ids_fail_every: int | None = None) -> None:
+        self.ids_fail_every = ids_fail_every  # 1이면 항상, k면 k번째 호출마다 실패
+        self.ids_calls = 0
         self.broken = broken_matches or set()
         self.all_fail = all_fail
         self.seeds = seeds if seeds is not None else {("GOLD", "I", 1): 12}
@@ -59,6 +62,9 @@ class FakeClient:
         return {"entries": [{"puuid": f"seed-{tier}-{i}"} for i in range(self.apex.get(tier, 0))]}
 
     async def get_match_ids(self, puuid, *, queue=None, start=0, count=100, start_time=None):
+        self.ids_calls += 1
+        if self.ids_fail_every and self.ids_calls % self.ids_fail_every == 0:
+            raise RiotServerError("ids boom")
         i = int(puuid.rsplit("-", 1)[1])
         base = i * 2 + 1 + (200 if "MASTER" in puuid else 0)
         return [f"KR_{base + k:010d}" for k in range(3)][:count]
@@ -345,11 +351,28 @@ async def test_failed_match_fetch_leaves_seed_incomplete_for_resume(store):
 
 
 async def test_aborts_tier_after_consecutive_failures(store):
-    c = FakeClient(seeds={("GOLD", "I", 1): 30}, all_fail=True)
+    c = FakeClient(seeds={("GOLD", "I", 1): 30}, all_fail=True, ids_fail_every=1)
     msgs = []
     await run(c, store, matches_per_tier=50, progress=msgs.append)
     assert store.get_baseline_job("GOLD")["status"] == "aborted"
     assert any("연속" in m and str(MAX_CONSECUTIVE_FAILURES) in m for m in msgs)
+
+
+async def test_failure_counter_resets_on_successful_ids_call(store):
+    # 매치 호출은 항상 실패하지만 id 조회가 두 번에 한 번 성공하므로 연속 실패가 누적되지 않음
+    c = FakeClient(seeds={("GOLD", "I", 1): 30}, all_fail=True, ids_fail_every=2)
+    await run(c, store, matches_per_tier=50)
+    assert store.get_baseline_job("GOLD")["status"] == "exhausted"
+
+
+def test_cli_reports_aborted_tier_with_exit_3(settings, capsys):
+    client = FakeClient(seeds={("GOLD", "I", 1): 30}, all_fail=True, ids_fail_every=1)
+    code = cli.main(["collect", "--tiers", "GOLD", "--matches-per-tier", "50"],
+                    settings=settings, client_factory=lambda s: client)
+    err = capsys.readouterr().err
+    assert code == 3
+    assert "일부 티어 수집 중단" in err and "GOLD" in err and "--resume" in err
+    assert "수집 완료" not in err
 
 
 def test_cli_build_and_export_do_not_need_api_key(tmp_path, monkeypatch, capsys):
