@@ -15,16 +15,36 @@ def _major(patch: str) -> str:
     return patch.split(".")[0]
 
 
+def _newest_first(stats: list[MatchStats]) -> list[MatchStats]:
+    return sorted((s for s in stats if not s.is_remake),
+                  key=lambda s: s.game_creation, reverse=True)
+
+
+def _recent_desc(count: int, actual: int) -> str:
+    return f"최근 {count}판" if actual >= count else f"최근 {count}판(실제 {actual}판)"
+
+
+def previous_period(
+    stats: list[MatchStats], count: int
+) -> tuple[list[MatchStats], list[MatchStats], str]:
+    """최근 N판과 그 이전 N판(부족하면 남은 판 전부). 둘 다 최신순, 다시하기 제외."""
+    count = max(count, 1)
+    games = _newest_first(stats)
+    recent = games[:count]
+    previous = games[count:2 * count]
+    return recent, previous, f"최근 {len(recent)}판 vs 그 이전 {len(previous)}판"
+
+
 def select(stats: list[MatchStats], period: str, count: int) -> tuple[list[MatchStats], str]:
     """기간에 해당하는 경기(최신순, 다시하기 제외)와 한국어 기간 설명을 반환."""
     if period not in PERIODS:
         raise ValueError(f"unknown period: {period}")
-    games = sorted((s for s in stats if not s.is_remake),
-                   key=lambda s: s.game_creation, reverse=True)
+    games = _newest_first(stats)
 
     if period == "recent_n":
-        picked = games[:max(count, 0)]
-        return picked, f"최근 {count}판"
+        count = max(count, 1)
+        picked = games[:count]
+        return picked, _recent_desc(count, len(picked))
 
     if not games:
         empty_desc = {

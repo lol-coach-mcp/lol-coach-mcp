@@ -111,6 +111,13 @@ def _round(metric: str, v: float | None) -> float | None:
     return round(v, 3 if metric in RATE_METRICS else 2)
 
 
+class EvidenceRow(dict):
+    """판정 근거 행. 그대로 dict(JSON 직렬화 가능)이며, 정렬·방향 판정용 원값을 속성으로 보관."""
+
+    raw_difference: float | None = None
+    raw_margin: float | None = None
+
+
 def _ref_summary(ref: list[float] | dict | None) -> dict | None:
     if ref is None:
         return None
@@ -132,7 +139,7 @@ def compare_metric(
     ref: list[float] | dict | None,
     ref_source: str,
     position: str,
-) -> dict:
+) -> EvidenceRow:
     label, higher = METRICS[metric]
     me = summary(list(mine))
     r = _ref_summary(ref)
@@ -144,13 +151,16 @@ def compare_metric(
         diff = me["mean"] - ref_mean
         margin = math.hypot(_half_width(me["std"], me["n"]), _half_width(r["std"], ref_n))
 
+    # 우선순위: 참고용 → 내 표본 부족 → 기준선 없음 → 비교 불가 → 비교 표본 부족 → ok
     if position == SUPPORT and metric in SUPPORT_REFERENCE_ONLY:
         status = STATUS_REFERENCE
+    elif me["n"] < MIN_GAMES:
+        status = STATUS_SHORT
     elif r is None:
         status = STATUS_NO_BASELINE
-    elif ref_mean is None or ref_n == 0 or me["n"] == 0:
+    elif ref_mean is None or ref_n == 0:
         status = STATUS_NOT_COMPARABLE
-    elif me["n"] < MIN_GAMES or (ref_n is not None and ref_n < MIN_REF_GAMES):
+    elif ref_n is not None and ref_n < MIN_REF_GAMES:
         status = STATUS_SHORT
     else:
         status = STATUS_OK
@@ -160,7 +170,7 @@ def compare_metric(
         clear = abs(diff) > margin
         strong = clear and abs(diff) >= 2 * margin
 
-    return {
+    row = EvidenceRow({
         "metric": metric,
         "label": label,
         "higher_is_better": higher,
@@ -174,12 +184,21 @@ def compare_metric(
         "clear_gap": clear,
         "strong_gap": strong,
         "status": status,
-    }
+    })
+    row.raw_difference = diff
+    row.raw_margin = margin
+    return row
 
 
 def _row_raw(row: dict) -> tuple[float, float]:
-    # clear/strong 판정은 원값으로 이미 끝남. 정렬은 표시값(반올림)으로 충분
-    return float(row.get("difference") or 0.0), float(row.get("margin") or 0.0)
+    """원값(반올림 전) 차이·오차폭. 일반 dict로 복사된 행이면 표시값으로 대신함."""
+    diff = getattr(row, "raw_difference", None)
+    margin = getattr(row, "raw_margin", None)
+    if diff is None:
+        diff = row.get("difference")
+    if margin is None:
+        margin = row.get("margin")
+    return float(diff or 0.0), float(margin or 0.0)
 
 
 def _effect(row: dict) -> float:

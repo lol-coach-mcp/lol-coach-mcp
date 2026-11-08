@@ -1,6 +1,6 @@
 import pytest
 
-from lol_coach_mcp.periods import select
+from lol_coach_mcp.periods import previous_period, select
 from lol_coach_mcp.stats import MatchStats
 
 MIN = 60_000
@@ -82,3 +82,25 @@ def test_remakes_excluded_and_empty():
 def test_unknown_period():
     with pytest.raises(ValueError):
         select([], "year", 5)
+
+
+def test_recent_n_actual_count_and_clamp():
+    games = [_ms(i, BASE + i * DAY) for i in range(1, 4)]
+    got, desc = select(games, "recent_n", 20)
+    assert len(got) == 3 and desc == "최근 20판(실제 3판)"
+    for bad in (0, -5):
+        got, desc = select(games, "recent_n", bad)
+        assert _ids(got) == ["03"] and desc == "최근 1판"
+
+
+def test_previous_period():
+    games = [_ms(i, BASE + i * DAY) for i in range(1, 8)]
+    recent, prev, desc = previous_period(list(reversed(games)), 3)
+    assert _ids(recent) == ["07", "06", "05"] and _ids(prev) == ["04", "03", "02"]
+    assert desc == "최근 3판 vs 그 이전 3판"
+    recent, prev, desc = previous_period(games, 5)
+    assert _ids(recent) == ["07", "06", "05", "04", "03"] and _ids(prev) == ["02", "01"]
+    assert desc == "최근 5판 vs 그 이전 2판"
+    recent, prev, _ = previous_period(games + [_ms(9, BASE + 99 * DAY, is_remake=True)], 0)
+    assert _ids(recent) == ["07"] and _ids(prev) == ["06"]
+    assert previous_period([], 3)[:2] == ([], [])

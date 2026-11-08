@@ -128,13 +128,16 @@ def test_support_cs_gold_reference_only():
     assert row["status"] == "ok" and row["clear_gap"] is True
 
 
+def _ten(v):
+    return [v] * 10  # sd 0 -> margin 0
+
+
 def test_direction_and_findings_sort():
-    ten = lambda v: [v] * 10  # sd 0 -> margin 0
     rows = [
         compare_metric("deaths", [6.0] * 5 + [4.0] * 5, {"mean": 3.0, "n": 100}, "b", "MIDDLE"),
         compare_metric("kda", [2.0] * 5 + [4.0] * 5, {"mean": 4.0, "n": 100}, "b", "MIDDLE"),
-        compare_metric("cs_per_min", ten(5.0), {"mean": 6.0, "n": 100}, "b", "MIDDLE"),
-        compare_metric("vision_per_min", ten(1.5), {"mean": 1.0, "n": 100}, "b", "MIDDLE"),
+        compare_metric("cs_per_min", _ten(5.0), {"mean": 6.0, "n": 100}, "b", "MIDDLE"),
+        compare_metric("vision_per_min", _ten(1.5), {"mean": 1.0, "n": 100}, "b", "MIDDLE"),
         compare_metric("win", [1.0] * 6 + [0.0] * 4, {"mean": 0.5, "n": 100}, "b", "MIDDLE"),
     ]
     by = {r["metric"]: r for r in rows}
@@ -238,3 +241,37 @@ def test_evidence_row_keys():
     assert set(row) == {"metric", "label", "higher_is_better", "my_value", "my_sample",
                         "ref_value", "ref_sample", "ref_source", "difference", "margin",
                         "clear_gap", "strong_gap", "status"}
+
+
+def test_sample_shortage_precedes_missing_reference():
+    for ref in (None, [], {"mean": None, "n": 0}):
+        row = compare_metric("kda", MINE[:9], ref, "티어 기준선", "MIDDLE")
+        assert row["status"] == "판단 보류(표본 부족)", ref
+    assert compare_metric("kda", [], None, "b", "MIDDLE")["status"] == "판단 보류(표본 부족)"
+    # 참고용은 표본 부족보다 앞
+    assert compare_metric("cs_per_min", [1.0], None, "b", "UTILITY")["status"] == "참고용"
+    assert compare_metric("kda", MINE, None, "b", "MIDDLE")["status"] == "기준선 없음"
+    assert compare_metric("kda", MINE, [], "b", "MIDDLE")["status"] == "비교 불가"
+    assert compare_metric("kda", MINE, MINE[:9], "b", "MIDDLE")["status"] == "판단 보류(표본 부족)"
+
+
+def test_findings_use_raw_sign():
+    # 표시값은 0.0으로 반올림되지만 원값 차이는 양수
+    rate = compare_metric("damage_share", [0.2004] * 10, {"mean": 0.2, "n": 100}, "b", "MIDDLE")
+    assert rate["difference"] == 0.0 and rate["clear_gap"] is True
+    deaths = compare_metric("deaths", [3.004] * 10, {"mean": 3.0, "n": 100}, "b", "MIDDLE")
+    assert deaths["difference"] == 0.0 and deaths["clear_gap"] is True
+    f = findings([rate, deaths])
+    assert [r["metric"] for r in f["strengths"]] == ["damage_share"]
+    assert [r["metric"] for r in f["weaknesses"]] == ["deaths"]
+
+
+def test_findings_sort_on_raw_margin():
+    a = compare_metric("kda", _ten(5.5), {"mean": 5.0, "n": 100}, "b", "MIDDLE")  # margin 0
+    b = compare_metric("cs_per_min", [11.5] * 5 + [8.5] * 5, {"mean": 5.0, "n": 100}, "b",
+                       "MIDDLE")  # margin 0.98, diff 5 -> 5.1
+    c = compare_metric("gold_per_min", [500.006] * 5 + [499.994] * 5, {"mean": 499.99, "n": 100},
+                       "b", "MIDDLE")  # raw margin 0.0039 (표시 0.0), diff 0.01 -> 2.55
+    assert c["margin"] == 0.0 and c["strong_gap"] is True and b["strong_gap"] is True
+    f = findings([c, b, a])
+    assert [r["metric"] for r in f["strengths"]] == ["kda", "cs_per_min", "gold_per_min"]
