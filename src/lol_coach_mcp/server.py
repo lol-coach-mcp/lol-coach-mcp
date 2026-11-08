@@ -55,8 +55,10 @@ RIOT_ID_FORMAT_ERROR = (
 
 KST = timezone(timedelta(hours=9))
 QUEUE_NAMES = {"RANKED_SOLO_5x5": "솔로랭크", "RANKED_FLEX_SR": "자유랭크"}
+QUEUE_LABELS = {420: "솔로랭크", 440: "자유랭크"}
 PROFILE_QUEUE = 420
 MAX_HISTORY_COUNT = 50
+SYNC_FAILED_NOTE = "동기화 실패, 저장된 데이터 기준"
 REVIEW_QUEUE = 420
 REVIEW_SYNC_LIMIT = 5
 OVERVIEW_MOMENT_LIMIT = 3
@@ -112,6 +114,20 @@ def _profile_text(p: Profile) -> str:
     return f"계정 {p.game_name}#{p.tag_line} 등록됨. 말투: {p.tone}."
 
 
+def queue_label(queue_id: int | None) -> str:
+    if queue_id is None:
+        return "전체 큐"
+    return QUEUE_LABELS.get(queue_id, f"큐 {queue_id}")
+
+
+def kst_text(iso: str) -> str:
+    """ISO 시각(타임존 없으면 UTC로 간주)을 `YYYY-MM-DD HH:MM KST` 표시 문자열로 변환함."""
+    dt = datetime.fromisoformat(iso)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(KST).strftime("%Y-%m-%d %H:%M KST")
+
+
 def _played_at(game_creation_ms: int) -> str:
     return datetime.fromtimestamp(game_creation_ms / 1000, tz=KST).isoformat(timespec="seconds")
 
@@ -162,7 +178,7 @@ async def _load_match(
 
 
 def _review_text(out: ReviewOut) -> str:
-    head = f"{out.champion} {out.position} {out.result} ({out.duration}, 큐 {out.queue_id}) [{out.focus}]."
+    head = f"{out.champion} {out.position} {out.result} ({out.duration}, {queue_label(out.queue_id)}) [{out.focus}]."
     if out.status == "다시하기":
         return f"{head} 다시하기 경기라 복기 대상이 아님."
     lines = [head]
@@ -325,7 +341,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         last = st.store.get_meta("last_sync_at")
         stored = len(st.store.list_my_stats(queue=None, include_remakes=True))
         out = CoachContextOut(profile=_profile_out(p), last_sync_at=last, stored_matches=stored)
-        sync_text = f"마지막 동기화: {last}." if last else "아직 동기화한 적 없음."
+        sync_text = f"마지막 동기화: {kst_text(last)}." if last else "아직 동기화한 적 없음."
         text = f"{_profile_text(p)} 저장된 경기 {stored}개. {sync_text}"
         return tool_result(out, text)
 
@@ -427,18 +443,21 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         count: int = 10,
         queue: int | None = 420,
     ) -> Annotated[CallToolResult, MatchHistoryOut]:
-        """최근 경기 목록(다시하기 포함)을 조회함. count는 1~50, queue 기본 420(솔로랭크). 저장된 경기가 부족하면 먼저 동기화함."""
+        """최근 경기 목록(다시하기 포함)을 조회함. count는 1~50, queue 기본 420(솔로랭크). 매번 새 경기를 동기화한 뒤 저장된 데이터로 응답하며, 동기화에 실패하면 저장된 데이터 기준으로 응답함."""
         st = _state(ctx)
         p = st.store.get_profile()
         if p is None:
             return tool_error(NO_PROFILE_MESSAGE)
         count = max(1, min(count, MAX_HISTORY_COUNT))
+        notes: list[str] = []
         try:
             await run_sync(st.riot, st.store, p.puuid, queue=queue, limit=count, full=False)
-        except RiotError as e:
-            return tool_error(str(e))
-        except httpx.HTTPError:
-            return tool_error(NETWORK_ERROR_MESSAGE)
+        except (RiotError, httpx.HTTPError) as e:
+            if not st.store.list_my_stats(queue=queue, limit=1, include_remakes=True):
+                if isinstance(e, RiotError):
+                    return tool_error(str(e))
+                return tool_error(NETWORK_ERROR_MESSAGE)
+            notes.append(SYNC_FAILED_NOTE)
         stats = st.store.list_my_stats(queue=queue, limit=count, include_remakes=True)
         last_sync = st.store.get_meta("last_sync_at")
         rows = [
@@ -458,20 +477,24 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             )
             for s in stats
         ]
-        out = MatchHistoryOut(queue_used=queue, last_sync_at=last_sync, matches=rows)
+        out = MatchHistoryOut(queue_used=queue, last_sync_at=last_sync, notes=notes, matches=rows)
         if not rows:
             return tool_result(out, "조회된 경기가 없음.")
         valid = [r for r in rows if r.result != "다시하기"]
         wins = sum(1 for r in valid if r.result == "승")
         remakes = len(rows) - len(valid)
+        notes_text = [n + "." for n in notes]
         lines = [
-            f"데이터 기준: 마지막 동기화 {last_sync}.",
+            f"데이터 기준: {queue_label(queue)}, 마지막 동기화 "
+            + (kst_text(last_sync) if last_sync else "기록 없음")
+            + ".",
+            *notes_text,
             f"최근 {len(rows)}경기: {wins}승 {len(valid) - wins}패"
             + (f", 다시하기 {remakes}판." if remakes else ".")
         ]
         for r in rows:
             lines.append(
-                f"{r.played_at[:16].replace('T', ' ')} {r.champion} {r.position} {r.result} "
+                f"{r.played_at[:16].replace('T', ' ')} KST {r.champion} {r.position} {r.result} "
                 f"{r.kills}/{r.deaths}/{r.assists} (KDA {r.kda}) CS {r.cs} ({r.cs_per_min}/분)"
                 + (f" [{', '.join(r.tags)}]" if r.tags else "")
             )

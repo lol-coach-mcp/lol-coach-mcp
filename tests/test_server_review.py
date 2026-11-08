@@ -229,3 +229,21 @@ async def test_foreign_match_errors(store):
         await _register(c)
         r = await c.call_tool("review_match", {"match_id": "KR_1"})
     assert r.is_error
+
+
+async def test_lane_focus_without_lane_opponent_is_not_comparable(store):
+    class NoOpp(ReviewRiot):
+        async def get_match(self, match_id):
+            m = await super().get_match(match_id)
+            for p in m["info"]["participants"]:
+                if p["puuid"] == PUUID_ME:
+                    p["teamPosition"] = ""
+            return m
+
+    async with Client(make_server(store, NoOpp())) as c:
+        await _register(c)
+        r = await c.call_tool("review_match", {"match_id": "KR_1", "focus": "lane"})
+    assert not r.is_error
+    lane = r.structured_content["lane"]
+    assert lane["status"] == "비교 불가" and lane["points"] == []
+    assert "솔로랭크" in r.content[0].text and "큐 420" not in r.content[0].text

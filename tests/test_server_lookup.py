@@ -1,11 +1,14 @@
 import copy
 
+from datetime import datetime, timedelta, timezone
+
 import httpx
 
 import pytest
 from mcp import Client
 
 from conftest import PUUID_ME, load_fixture
+from lol_coach_mcp.riot.errors import RiotServerError
 from lol_coach_mcp.stats import extract_match_stats
 from test_server_profile import RIOT_ID, FakeRiot, make_server, store  # noqa: F401
 
@@ -208,7 +211,7 @@ async def test_history_count_clamp(store):
     assert len(r100.structured_content["matches"]) == 50
 
 
-async def test_history_queue_none_and_no_sync_when_enough(store):
+async def test_history_queue_none_syncs_without_queue_filter_and_skips_when_enough(store):
     riot = LookupRiot()
     seen = []
     orig = riot.get_match_ids
@@ -258,3 +261,64 @@ async def test_history_picks_up_new_head_ids_and_reports_sync_time(store):
     assert r2.structured_content["last_sync_at"]
     assert [m["match_id"] for m in r2.structured_content["matches"]][0] == "KR_4"
     assert "동기화" in r2.content[0].text
+
+
+class _Down(LookupRiot):
+    def __init__(self, exc, **kw):
+        super().__init__(**kw)
+        self.exc = exc
+        self.down = False
+
+    async def get_match_ids(self, puuid, **kw):
+        if self.down:
+            raise self.exc
+        return await super().get_match_ids(puuid, **kw)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [RiotServerError(), httpx.ConnectTimeout("timeout")],
+    ids=["riot", "network"],
+)
+async def test_history_falls_back_to_stored_data_when_sync_fails(store, exc):
+    riot = _Down(exc)
+    async with Client(make_server(store, riot)) as c:
+        await _register(c)
+        await c.call_tool("get_match_history", {"count": 3})
+        riot.down = True
+        r = await c.call_tool("get_match_history", {"count": 3})
+    assert not r.is_error
+    assert len(r.structured_content["matches"]) == 3
+    assert "동기화 실패, 저장된 데이터 기준" in r.structured_content["notes"]
+    assert "동기화 실패, 저장된 데이터 기준" in r.content[0].text
+
+
+async def test_history_sync_failure_without_stored_data_is_error(store):
+    riot = _Down(httpx.ConnectTimeout("timeout"))
+    riot.down = True
+    async with Client(make_server(store, riot)) as c:
+        await _register(c)
+        r = await c.call_tool("get_match_history", {"count": 3})
+    assert r.is_error
+
+
+async def test_user_facing_times_are_kst_and_queue_labeled(store):
+    async with Client(make_server(store, LookupRiot())) as c:
+        await _register(c)
+        h = await c.call_tool("get_match_history", {"count": 3})
+        ctx = await c.call_tool("get_coach_context", {})
+    iso = h.structured_content["last_sync_at"]
+    assert "T" in iso and "KST" not in iso
+    kst = datetime.fromisoformat(iso).astimezone(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M KST")
+    assert kst in h.content[0].text and kst in ctx.content[0].text
+    assert iso not in h.content[0].text and iso not in ctx.content[0].text
+    assert "솔로랭크" in h.content[0].text
+    assert all(" KST " in ln for ln in h.content[0].text.splitlines()[2:])
+
+
+def test_queue_label():
+    from lol_coach_mcp.server import queue_label
+
+    assert queue_label(420) == "솔로랭크"
+    assert queue_label(440) == "자유랭크"
+    assert queue_label(450) == "큐 450"

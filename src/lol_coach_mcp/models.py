@@ -72,6 +72,7 @@ class MatchRowOut(BaseModel):
 class MatchHistoryOut(BaseModel):
     queue_used: int | None = None
     last_sync_at: str | None = None
+    notes: list[str] = []
     matches: list[MatchRowOut]
 
 
