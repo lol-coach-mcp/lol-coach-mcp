@@ -177,8 +177,10 @@ def death_points(timeline: dict, puuid: str) -> list[dict]:
     out = []
     for e in _my_death_events(timeline, pid):
         pos = e.get("position") or {}
+        if "x" not in pos or "y" not in pos:
+            continue  # 위치 없는 데스는 (0,0)에 찍지 않고 제외
         out.append({"ms": int(e["timestamp"]), "time": mmss(e["timestamp"]),
-                    "x": int(pos.get("x", 0)), "y": int(pos.get("y", 0))})
+                    "x": int(pos["x"]), "y": int(pos["y"])})
     return out
 
 

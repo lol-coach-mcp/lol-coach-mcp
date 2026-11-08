@@ -310,3 +310,12 @@ def test_death_points_match_deaths_and_have_coordinates(match, timeline):
 def test_death_points_unknown_puuid_raises(timeline):
     with pytest.raises(ValueError):
         review.death_points(timeline, "nobody")
+
+
+def test_death_points_skip_missing_position(timeline):
+    tl = copy.deepcopy(timeline)
+    n = len(review.death_points(tl, PUUID_ME))
+    pid = review.participant_id(tl, PUUID_ME)
+    victim = next(e for e in _events(tl) if e["type"] == "CHAMPION_KILL" and e.get("victimId") == pid)
+    victim.pop("position", None)
+    assert len(review.death_points(tl, PUUID_ME)) == n - 1

@@ -183,6 +183,12 @@ class DataDragon:
             raise httpx.DecodingError("Data Dragon 미니맵이 PNG 형식이 아님")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
+        for old in path.parent.glob(f"{MAP_FILE}-*.png"):
+            if old != path:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
         return data
 
     async def _get_bytes(self, path: str) -> bytes:

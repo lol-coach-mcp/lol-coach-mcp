@@ -23,7 +23,7 @@ from lol_coach_mcp import (
     analysis, builds, champions, explain as explain_mod, form, goals as goals_mod, habits,
     journal as journal_mod, matchups, memory, periods, review, splits,
 )
-from lol_coach_mcp.dashboard import render as dash_render, views as dash_views
+from lol_coach_mcp.dashboard import ranks, render as dash_render, views as dash_views
 from lol_coach_mcp.dashboard.render import empty_state, kv_list
 from lol_coach_mcp.ddragon import DataDragon
 from lol_coach_mcp.opgg import OpggClient, opgg_champion_key, opgg_position
@@ -1023,11 +1023,14 @@ def _dash_lp_rows(st: AppState, p: Profile) -> list[dict]:
         solo = next((e for e in entries if e.get("queueType") == SOLO_QUEUE_TYPE), None)
         if t is None or solo is None or (since is not None and t < since):
             continue
+        ladder = ranks.ladder_value(solo.get("tier", ""), solo.get("rank", ""), solo.get("leaguePoints", 0))
+        if ladder is None:
+            continue
         first = first or t
         rows.append({
             "at": kst_text(taken_at), "days": (t - first).total_seconds() / 86400,
             "tier": str(solo.get("tier", "")), "rank": str(solo.get("rank", "")),
-            "lp": int(solo.get("leaguePoints", 0)),
+            "lp": int(solo.get("leaguePoints", 0)), "ladder": ladder,
         })
     return rows
 
@@ -1150,6 +1153,20 @@ async def _dash_match(
         minimap_uri=minimap,
         objective_events=review.objectives(match, timeline, p.puuid)["events"],
     )
+
+
+def _write_new(directory: Path, stem: str, text: str) -> Path:
+    """같은 이름이 있으면 -2, -3 … 접미사를 붙여 새 파일로 저장함(덮어쓰지 않음)."""
+    n = 1
+    while True:
+        path = directory / (f"{stem}.html" if n == 1 else f"{stem}-{n}.html")
+        try:
+            with open(path, "x", encoding="utf-8") as f:
+                f.write(text)
+        except FileExistsError:
+            n += 1
+            continue
+        return path
 
 
 def _dashboard_text(out: DashboardOut, open_browser: bool) -> str:
@@ -2533,16 +2550,16 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             title, sections, now.strftime("%Y-%m-%d %H:%M:%S KST"), notes
         )
         reports = (Path(st.settings.data_dir) / "reports").resolve()
-        path = reports / f"{view}-{now.strftime('%Y%m%d-%H%M%S')}.html"
+        stem = f"{view}-{now.strftime('%Y%m%d-%H%M%S')}"
         try:
             reports.mkdir(parents=True, exist_ok=True)
-            path.write_text(page, encoding="utf-8")
+            path = _write_new(reports, stem, page)
         except OSError as e:
             return tool_error(f"대시보드 파일을 저장하지 못함: {e}")
         opened = False
         if open_browser:
             try:
-                opened = bool(st.open_url(path.as_uri()))
+                opened = bool(await asyncio.to_thread(st.open_url, path.as_uri()))
             except Exception:  # noqa: BLE001 — 브라우저 실패는 경로만 반환
                 opened = False
         out = DashboardOut(

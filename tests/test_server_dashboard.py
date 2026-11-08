@@ -358,3 +358,48 @@ def test_default_opener_is_webbrowser_open():
 
     st = AppState(settings=None, riot=None, store=None)
     assert st.open_url is webbrowser.open
+
+
+async def test_season_lp_line_uses_ladder_value_across_promotion(store, tmp_path):
+    server, _, _ = make(store, tmp_path)
+    async with Client(server) as c:
+        await _register(c)
+        _save(store, _mixed(12))
+        entry = lambda tier, rank, lp: [{"queueType": "RANKED_SOLO_5x5", "tier": tier,  # noqa: E731
+                                         "rank": rank, "leaguePoints": lp}]
+        now = datetime.now(timezone.utc)
+        store.add_rank_snapshot(entry("GOLD", "I", 95), (now + timedelta(days=1)).isoformat())
+        store.add_rank_snapshot(entry("PLATINUM", "IV", 12), (now + timedelta(days=2)).isoformat())
+        r = await c.call_tool("open_dashboard", {"view": "season", "open_browser": False})
+    html = _html(r.structured_content)
+    assert "래더 점수(LP 환산)" in html
+    assert ">1612.0<" in html and ">1595.0<" in html  # 축 라벨에 환산값
+    assert "PLATINUM IV" in html
+
+
+async def test_same_second_reports_do_not_collide(store, tmp_path):
+    server, _, reports = make(store, tmp_path)
+    async with Client(server) as c:
+        await _register(c)
+        a = await c.call_tool("open_dashboard", {"open_browser": False})
+        b = await c.call_tool("open_dashboard", {"open_browser": False})
+    pa, pb = a.structured_content["path"], b.structured_content["path"]
+    assert pa != pb and len(list(reports.glob("overview-*.html"))) == 2
+    assert pb.endswith("-2.html")
+
+
+async def test_opener_runs_off_event_loop_thread(store, tmp_path):
+    import threading
+
+    seen = []
+
+    def opener(url):
+        seen.append(threading.current_thread())
+        return True
+
+    server, _, _ = make(store, tmp_path, opener=opener)
+    async with Client(server) as c:
+        await _register(c)
+        r = await c.call_tool("open_dashboard", {})
+    assert r.structured_content["opened"] is True
+    assert seen and seen[0] is not threading.main_thread()

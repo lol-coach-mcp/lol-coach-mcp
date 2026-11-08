@@ -145,15 +145,16 @@ def season_view(
     names: dict[str, str],
     period_desc: str,
 ) -> list[Section]:
-    """lp_rows: [{at, days, tier, rank, lp}] (등록 이후, 시간순). chrono: 시간순 MatchStats."""
+    """lp_rows: [{at, days, tier, rank, lp, ladder}] (등록 이후, 시간순). chrono: 시간순 MatchStats."""
     out: list[Section] = []
     if lp_rows:
         chart = svg.line_chart(
-            [{"label": "솔로랭크 LP(디비전 내)", "points": [(r["days"], r["lp"]) for r in lp_rows]}],
-            x_label="첫 스냅샷 이후 일수", y_label="LP",
+            [{"label": "솔로랭크 래더 환산", "points": [(r["days"], r["ladder"]) for r in lp_rows]}],
+            x_label="첫 스냅샷 이후 일수", y_label="래더 점수(LP 환산)",
         )
         recent = list(lp_rows)[-LP_TABLE_LIMIT:]
-        out.append(section("LP 추이", chart + table(
+        note = kv_list([("안내", "티어·디비전·LP를 한 축으로 환산한 표시용 값이며 MMR 추정이 아님")])
+        out.append(section("LP 추이", chart + note + table(
             ["시각(KST)", "티어", "LP"],
             [[r["at"], f"{r['tier']} {r['rank']}".strip(), r["lp"]] for r in recent],
         )))

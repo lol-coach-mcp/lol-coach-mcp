@@ -245,3 +245,15 @@ async def test_map_image_rejects_non_png(store, http, clock, tmp_path):
     with pytest.raises(httpx.HTTPError):
         await DataDragon(store, http, user_agent=UA, now=clock).map_image(tmp_path)
     assert not list(tmp_path.glob("*.png"))
+
+
+@respx.mock
+async def test_map_image_prunes_old_versions(store, http, clock, tmp_path):
+    respx.get(VERSIONS).respond(json=["16.22.1"])
+    respx.get(MAP_URL).respond(content=PNG)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "map11-16.10.1.png").write_bytes(PNG)
+    (cache / "other.txt").write_text("keep")
+    await DataDragon(store, http, user_agent=UA, now=clock).map_image(cache)
+    assert sorted(p.name for p in cache.iterdir()) == ["map11-16.22.1.png", "other.txt"]
