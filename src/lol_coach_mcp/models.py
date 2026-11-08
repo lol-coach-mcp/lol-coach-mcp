@@ -24,6 +24,17 @@ class CoachContextOut(BaseModel):
     journal: list[dict] = []
 
 
+class GoalsOut(BaseModel):
+    action: str
+    queue: int = 420
+    position: str | None = None
+    suggestion: dict | None = None
+    reason: str | None = None
+    practice: dict[str, list[str]] = {}
+    goals: list[dict] = []
+    notes: list[str] = []
+
+
 class SyncOut(BaseModel):
     new_matches: int
     total_stored: int

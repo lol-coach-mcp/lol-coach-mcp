@@ -14,7 +14,8 @@ from mcp_types import CallToolResult
 
 from lol_coach_mcp.config import Settings, load_settings
 from lol_coach_mcp import (
-    analysis, builds, champions, form, habits, matchups, memory, periods, review, splits,
+    analysis, builds, champions, form, goals as goals_mod, habits, matchups, memory, periods,
+    review, splits,
 )
 from lol_coach_mcp.ddragon import DataDragon
 from lol_coach_mcp.opgg import OpggClient, opgg_champion_key, opgg_position
@@ -27,6 +28,7 @@ from lol_coach_mcp.models import (
     DetailTeamOut,
     DuoPartnerOut,
     FormOut,
+    GoalsOut,
     HabitsOut,
     LaneOut,
     MasteryOut,
@@ -378,6 +380,67 @@ async def _sync_for_analysis(
             return tool_error(NETWORK_ERROR_MESSAGE)
         return [SYNC_FAILED_NOTE]
     return []
+
+
+NO_GAMES_FOR_GOAL = "저장된 솔로랭크 경기가 없어 과제를 정할 수 없음. 먼저 경기를 동기화해야 함."
+GOAL_NEEDS_METRIC = "이 동작은 metric 인자가 필요함. 지원 지표: {metrics}."
+GOAL_NEEDS_ID = '이 동작은 goal_id 인자가 필요함. goals(action="list")로 확인할 수 있음.'
+GOAL_NOT_FOUND = "해당 goal_id의 과제가 없음: {goal_id}."
+NO_GOAL_TEXT = "집중 과제 없음."
+GOAL_DIRECTION_TEXT = {"up": "이상", "down": "이하"}
+NO_SUGGESTION_REASON = (
+    "최근 20판 표본이 부족하거나 내 승리 판 평균과 뚜렷한 차이를 보이는 약점 지표가 없음"
+)
+
+
+def _goal_view(g: dict, progress: dict | None) -> dict:
+    out = dict(g)
+    if progress is not None:
+        out["progress"] = {
+            **progress,
+            "current_avg": analysis.round_metric(g["metric"], progress["current_avg"]),
+            "change_vs_baseline": analysis.round_metric(g["metric"], progress["change_vs_baseline"]),
+        }
+    return out
+
+
+def _goal_line(g: dict) -> str:
+    label = analysis.METRICS[g["metric"]][0]
+    base = "없음" if g["baseline_value"] is None else _fmt(g["metric"], g["baseline_value"])
+    line = (
+        f"#{g['id']} {label}({g['metric']}) 목표 {_fmt(g['metric'], g['target'])} "
+        f"{GOAL_DIRECTION_TEXT[g['direction']]}, 시작 시 평균 {base}, "
+        f"{g['games_to_track']}판 추적, 포지션 {g['position']}, 상태 {g['status']}"
+    )
+    pr = g.get("progress")
+    if pr is not None:
+        cur = "집계 경기 없음" if pr["current_avg"] is None else (
+            f"현재 평균 {_fmt(g['metric'], pr['current_avg'])}, "
+            f"시작 시 대비 {pr['change_vs_baseline']:+g}"
+        )
+        line += f" (집계 {pr['games_done']}/{pr['games_needed']}판, {cur})"
+    return line
+
+
+def _goals_text(out: GoalsOut) -> str:
+    lines = [f"솔로랭크(큐 420) 기준, 포지션 {out.position or '-'}.", *[n + "." for n in out.notes]]
+    if out.action == "suggest":
+        s = out.suggestion
+        if s is None:
+            lines.append(f"제안할 과제 없음: {out.reason}.")
+        else:
+            label = analysis.METRICS[s["metric"]][0]
+            lines.append(
+                f"제안: {label}({s['metric']}) 목표 {_fmt(s['metric'], s['target'])} "
+                f"{GOAL_DIRECTION_TEXT[s['direction']]}, 내 평균 {_fmt(s['metric'], s['baseline_value'])}, "
+                f"{s['games']}판 추적. 저장되지 않았으며 set으로 저장할 수 있음."
+            )
+            lines += [f"- {t}" for t in out.practice.get(s["metric"], [])]
+    else:
+        lines += [_goal_line(g) for g in out.goals] if out.goals else [NO_GOAL_TEXT]
+        if out.action == "set":
+            lines += [f"- {t}" for ts in out.practice.values() for t in ts]
+    return "\n".join(lines)
 
 
 CHAMPION_DEFAULT_COUNT = 50
@@ -1289,6 +1352,124 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             notes=sync_notes + built["notes"],
         )
         return tool_result(out, _splits_text(out))
+
+    @mcp.tool()
+    async def goals(
+        action: Literal["suggest", "set", "check", "complete", "list"],
+        ctx: Context,
+        metric: str | None = None,
+        target: float | None = None,
+        games: int = goals_mod.DEFAULT_GAMES,
+        goal_id: int | None = None,
+    ) -> Annotated[CallToolResult, GoalsOut]:
+        """집중 과제 관리. suggest: 최근 20판 약점 1순위로 과제·연습 과제 제안(저장 안 함), set: 과제 저장(metric 필수, target 없으면 제안 목표), check: 진행 중 과제를 시작 이후 경기로 판정, complete: 과제 종료(goal_id), list: 전체 과제."""
+        st = _state(ctx)
+        p = st.store.get_profile()
+        if p is None:
+            return tool_error(NO_PROFILE_MESSAGE)
+        queue = goals_mod.GOAL_QUEUE
+        now_text = _now_kst(st).isoformat(timespec="seconds")
+
+        def done(**kw: Any) -> CallToolResult:
+            out = GoalsOut(action=action, **kw)
+            return tool_result(out, _goals_text(out))
+
+        if action == "list":
+            return done(goals=[_goal_view(g, None) for g in st.store.list_goals()])
+
+        if action == "complete":
+            if goal_id is None:
+                return tool_error(GOAL_NEEDS_ID)
+            if st.store.get_goal(goal_id) is None:
+                return tool_error(GOAL_NOT_FOUND.format(goal_id=goal_id))
+            st.store.update_goal(goal_id, status=goals_mod.STATUS_CLOSED, closed_at=now_text)
+            return done(goals=[_goal_view(st.store.get_goal(goal_id), None)])
+
+        if action == "check":
+            if goal_id is not None:
+                g = st.store.get_goal(goal_id)
+                if g is None:
+                    return tool_error(GOAL_NOT_FOUND.format(goal_id=goal_id))
+                targets = [g] if g["status"] == goals_mod.STATUS_ACTIVE else []
+            else:
+                targets = st.store.list_goals(status=goals_mod.STATUS_ACTIVE)
+            if not targets:
+                return done()
+            sync_notes = await _sync_for_analysis(st, p, queue, FORM_DEFAULT_COUNT)
+            if isinstance(sync_notes, CallToolResult):
+                return sync_notes
+            stats = st.store.list_my_stats(queue=queue, include_remakes=True)
+            views = []
+            for g in targets:
+                progress = goals_mod.evaluate_goal(g, stats)
+                if progress["status"] != goals_mod.STATUS_ACTIVE:
+                    st.store.update_goal(g["id"], status=progress["status"], closed_at=now_text)
+                    g = st.store.get_goal(g["id"])
+                views.append(_goal_view(g, progress))
+            return done(goals=views, notes=sync_notes)
+
+        # suggest / set: 최근 20판 기준 약점 분석이 필요함
+        if action == "set":
+            if metric is None:
+                return tool_error(GOAL_NEEDS_METRIC.format(metrics=", ".join(goals_mod.GOAL_METRICS)))
+            if metric not in goals_mod.GOAL_METRICS:
+                return tool_error(
+                    f"지원하지 않는 지표: {metric}. 지원 지표: {', '.join(goals_mod.GOAL_METRICS)}."
+                )
+            if games < 1:
+                return tool_error("games는 1 이상이어야 함.")
+        sync_notes = await _sync_for_analysis(st, p, queue, FORM_DEFAULT_COUNT)
+        if isinstance(sync_notes, CallToolResult):
+            return sync_notes
+        stats = st.store.list_my_stats(queue=queue, include_remakes=True)
+        picked, _ = periods.select(stats, "recent_n", goals_mod.BASELINE_GAMES)
+        if not picked:
+            return tool_error(NO_GAMES_FOR_GOAL)
+        position = analysis.main_position(picked)
+        series = analysis.metric_series([s for s in picked if s.position == position])
+        built = form.build_form(
+            stats, period="recent_n", count=goals_mod.BASELINE_GAMES, compare_to="best_self",
+            tier=None, tier_note=None, get_baseline=st.store.get_baseline,
+        )
+        notes = sync_notes + built["notes"]
+        catalog = goals_mod.load_practice()
+
+        if action == "suggest":
+            sug = goals_mod.suggest_goal(built["weaknesses"], series, games=games)
+            if sug is None:
+                return done(position=position, reason=NO_SUGGESTION_REASON, notes=notes)
+            sug["baseline_value"] = analysis.round_metric(sug["metric"], sug["baseline_value"])
+            return done(
+                position=position, suggestion=sug,
+                practice={sug["metric"]: catalog.get(sug["metric"], [])}, notes=notes,
+            )
+
+        if target is None:
+            sug = goals_mod.suggest_goal(built["weaknesses"], series, games=games, metric=metric)
+            if sug is None:
+                return tool_error(
+                    f"{metric}은(는) 현재 약점으로 확인되지 않아 목표를 자동으로 정할 수 없음. "
+                    "target 인자를 직접 지정해야 함."
+                )
+            target = sug["target"]
+        values = series[metric]
+        if not values:
+            return tool_error(NO_GAMES_FOR_GOAL)
+        all_stored = st.store.list_my_stats(queue=None, include_remakes=True)
+        new_id = st.store.add_goal({
+            "created_at": now_text,
+            "metric": metric,
+            "direction": goals_mod.direction_of(metric),
+            "target": target,
+            "baseline_value": sum(values) / len(values),
+            "start_after_ms": max(s.game_creation for s in all_stored),
+            "games_to_track": games,
+            "position": position,
+        })
+        return done(
+            position=position, goals=[_goal_view(st.store.get_goal(new_id), None)],
+            practice={metric: catalog.get(metric, [])}, notes=notes,
+        )
 
     @mcp.tool()
     async def find_habits(
