@@ -14,7 +14,7 @@ from mcp_types import CallToolResult
 
 from lol_coach_mcp.config import Settings, load_settings
 from lol_coach_mcp import (
-    analysis, builds, champions, form, habits, matchups, periods, review, splits,
+    analysis, builds, champions, form, habits, matchups, memory, periods, review, splits,
 )
 from lol_coach_mcp.ddragon import DataDragon
 from lol_coach_mcp.opgg import OpggClient, opgg_champion_key, opgg_position
@@ -108,6 +108,7 @@ class AppState:
     opgg: Any = None  # OpggClient 또는 가짜 객체. None이면 OP.GG 데이터 없음으로 처리
     ddragon: Any = None  # DataDragon 또는 가짜 객체. None이면 Data Dragon 데이터 없음
     http: Any = None  # 기본 팩토리가 만든 httpx.AsyncClient(종료 시 닫음)
+    now: Callable[[], datetime] | None = None  # 시계 주입(테스트용). None이면 현재 시각
 
 
 def _default_state() -> AppState:
@@ -137,6 +138,33 @@ def _profile_out(p: Profile | None) -> ProfileOut:
         tone=p.tone,
         detail_level=p.detail_level,
     )
+
+
+def _context_text(p: Profile, out: CoachContextOut) -> str:
+    sync = f"마지막 동기화: {kst_text(out.last_sync_at)}." if out.last_sync_at else "아직 동기화한 적 없음."
+    parts = [f"{_profile_text(p)} 저장된 경기 {out.stored_matches}개. {sync}"]
+    if out.goals:
+        goals = ", ".join(
+            f"#{g['id']} {g['metric']} {'이상' if g['direction'] == 'up' else '이하'} "
+            f"{g['target']:g} ({g['games_to_track']}판)"
+            for g in out.goals
+        )
+        parts.append(f"진행 중 집중 과제: {goals}.")
+    else:
+        parts.append("집중 과제 없음.")
+    if out.findings:
+        items = ", ".join(
+            f"{f['kind']} {f['metric']}({f['created_at'][:10]}"
+            + (", 오래된 기록" if f["stale"] else "") + ")"
+            for f in out.findings
+        )
+        parts.append(f"최근 판정 기록: {items}.")
+    else:
+        parts.append("저장된 판정 기록 없음.")
+    if out.journal:
+        notes = " / ".join(f"{j['created_at'][:10]} {j['text']}" for j in out.journal)
+        parts.append(f"최근 일지: {notes}.")
+    return " ".join(parts)
 
 
 def _profile_text(p: Profile) -> str:
@@ -176,6 +204,10 @@ def _damage_rank(participants: list[dict], me: dict) -> int:
     # 딜량 내림차순, 동률은 참가자 순서 우선(안정 정렬)
     ordered = sorted(participants, key=lambda p: -p.get("totalDamageDealtToChampions", 0))
     return next(i for i, p in enumerate(ordered, start=1) if p["puuid"] == me["puuid"])
+
+
+def _now_kst(st: AppState) -> datetime:
+    return (st.now() if st.now else datetime.now(timezone.utc)).astimezone(KST)
 
 
 def _state(ctx: Context) -> AppState:
@@ -753,7 +785,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             if action == "forget":
                 st.store.forget_all(include_matches)
                 suffix = " 저장된 경기 데이터도 삭제함." if include_matches else ""
-                return tool_result(_profile_out(None), f"프로필과 동기화 기록을 삭제함.{suffix}")
+                return tool_result(_profile_out(None), f"프로필, 동기화 기록, 코치 기억(판정 기록·과제·일지)을 삭제함.{suffix}")
 
             # set
             p = st.store.get_profile()
@@ -815,10 +847,21 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         if p is None:
             return tool_error(NO_PROFILE_MESSAGE)
         last = st.store.get_meta("last_sync_at")
-        stored = len(st.store.list_my_stats(queue=None, include_remakes=True))
-        out = CoachContextOut(profile=_profile_out(p), last_sync_at=last, stored_matches=stored)
-        sync_text = f"마지막 동기화: {kst_text(last)}." if last else "아직 동기화한 적 없음."
-        text = f"{_profile_text(p)} 저장된 경기 {stored}개. {sync_text}"
+        all_stats = st.store.list_my_stats(queue=None, include_remakes=True)
+        stored = len(all_stats)
+        now = _now_kst(st)
+        major = memory.latest_major(all_stats)
+        goals = st.store.list_goals(status="진행 중")
+        findings = [
+            {**f, "stale": memory.is_stale(f, now=now, current_major=major)}
+            for f in st.store.list_findings(memory.CONTEXT_FINDINGS)
+        ]
+        journal = st.store.list_journal(memory.CONTEXT_JOURNAL)
+        out = CoachContextOut(
+            profile=_profile_out(p), last_sync_at=last, stored_matches=stored,
+            goals=goals, findings=findings, journal=journal,
+        )
+        text = _context_text(p, out)
         return tool_result(out, text)
 
     @mcp.tool()
@@ -1194,6 +1237,14 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             get_baseline=st.store.get_baseline,
         )
         built["notes"] = sync_notes + built["notes"]
+        solo_now = [s for s in stats if not s.is_remake]
+        st.store.add_findings(
+            memory.finding_rows(
+                built,
+                created_at=_now_kst(st).isoformat(timespec="seconds"),
+                season_major=memory.latest_major(solo_now),
+            )
+        )
         all_solo = st.store.list_my_stats(queue=analysis.RECORD_QUEUE, include_remakes=True)
         latest = max(
             (s for s in all_solo if not s.is_remake), key=lambda s: s.game_creation, default=None

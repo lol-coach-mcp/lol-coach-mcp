@@ -52,10 +52,10 @@ def store(tmp_path):
     s.close()
 
 
-def make_server(store, riot=None):
+def make_server(store, riot=None, now=None):
     riot = riot or FakeRiot()
     settings = Settings(riot_api_key="k", data_dir=store_dir(store), user_agent="t")
-    return create_server(lambda: AppState(settings=settings, riot=riot, store=store))
+    return create_server(lambda: AppState(settings=settings, riot=riot, store=store, now=now))
 
 
 def store_dir(store):

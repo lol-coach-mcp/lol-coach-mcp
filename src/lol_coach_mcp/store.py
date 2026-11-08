@@ -10,7 +10,7 @@ from typing import Any
 
 from lol_coach_mcp.stats import MatchStats
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 TONES = ("직설", "격려", "데이터만")
 DETAIL_LEVELS = ("초보", "보통", "숙련")
@@ -88,8 +88,50 @@ CREATE TABLE IF NOT EXISTS ddragon_cache (
 );
 """
 
+# 코치 기억(사용자 데이터 → forget_all 대상). created_at은 KST ISO 문자열
+_SCHEMA_V4 = """
+CREATE TABLE IF NOT EXISTS coach_findings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    my_value REAL,
+    ref_value REAL,
+    ref_source TEXT,
+    games INTEGER,
+    period_desc TEXT,
+    season_major TEXT,
+    position TEXT
+);
+CREATE TABLE IF NOT EXISTS goals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    target REAL NOT NULL,
+    baseline_value REAL,
+    start_after_ms INTEGER NOT NULL,
+    games_to_track INTEGER NOT NULL,
+    position TEXT,
+    status TEXT NOT NULL DEFAULT '진행 중',
+    closed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS journal (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    match_id TEXT,
+    text TEXT NOT NULL
+);
+"""
+
+GOAL_STATUSES = ("진행 중", "달성", "미달", "종료")
+_GOAL_UPDATABLE = ("status", "closed_at", "target", "games_to_track")
+MEMORY_TABLES = ("coach_findings", "goals", "journal")
+
 # (도달 버전, 스크립트) — 낮은 버전부터 차례로 적용
-_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3))
+_MIGRATIONS = (
+    (1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4),
+)
 
 
 @dataclass
@@ -312,8 +354,88 @@ class Store:
         with self._conn:
             self._conn.execute(sql, params)
 
+    # 코치 판정 기록
+    def add_findings(self, rows: list[dict]) -> int:
+        """저장한 행 수를 반환. 같은 KST 날짜(created_at 앞 10자)에 같은 kind+metric은 건너뜀."""
+        added = 0
+        with self._conn:
+            for r in rows:
+                dup = self._conn.execute(
+                    "SELECT 1 FROM coach_findings WHERE kind = ? AND metric = ? "
+                    "AND substr(created_at, 1, 10) = ?",
+                    (r["kind"], r["metric"], r["created_at"][:10]),
+                ).fetchone()
+                if dup:
+                    continue
+                self._conn.execute(
+                    "INSERT INTO coach_findings (created_at, kind, metric, my_value, ref_value, "
+                    "ref_source, games, period_desc, season_major, position) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (r["created_at"], r["kind"], r["metric"], r.get("my_value"),
+                     r.get("ref_value"), r.get("ref_source"), r.get("games"),
+                     r.get("period_desc"), r.get("season_major"), r.get("position")),
+                )
+                added += 1
+        return added
+
+    def list_findings(self, limit: int) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM coach_findings ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
+        )
+        return [dict(r) for r in rows]
+
+    # 집중 과제
+    def add_goal(self, g: dict) -> int:
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO goals (created_at, metric, direction, target, baseline_value, "
+                "start_after_ms, games_to_track, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (g["created_at"], g["metric"], g["direction"], g["target"],
+                 g.get("baseline_value"), g["start_after_ms"], g["games_to_track"],
+                 g.get("position")),
+            )
+        return int(cur.lastrowid)
+
+    def get_goal(self, goal_id: int) -> dict | None:
+        row = self._conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_goals(self, status: str | None = None) -> list[dict]:
+        sql, params = "SELECT * FROM goals", []
+        if status is not None:
+            sql += " WHERE status = ?"
+            params.append(status)
+        sql += " ORDER BY id DESC"
+        return [dict(r) for r in self._conn.execute(sql, params)]
+
+    def update_goal(self, goal_id: int, **fields: Any) -> None:
+        if not fields or set(fields) - set(_GOAL_UPDATABLE):
+            raise ValueError(f"수정할 수 없는 필드: {sorted(set(fields) - set(_GOAL_UPDATABLE))}")
+        if "status" in fields and fields["status"] not in GOAL_STATUSES:
+            raise ValueError(f"알 수 없는 상태: {fields['status']}")
+        assignments = ", ".join(f"{k} = ?" for k in fields)  # 키는 허용 목록으로 검증됨
+        with self._conn:
+            self._conn.execute(
+                f"UPDATE goals SET {assignments} WHERE id = ?", [*fields.values(), goal_id]
+            )
+
+    # 일지
+    def add_journal(self, created_at: str, match_id: str | None, text: str) -> int:
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO journal (created_at, match_id, text) VALUES (?, ?, ?)",
+                (created_at, match_id, text),
+            )
+        return int(cur.lastrowid)
+
+    def list_journal(self, limit: int) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM journal ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
+        )
+        return [dict(r) for r in rows]
+
     def forget_all(self, include_matches: bool = False) -> None:
-        tables = ["profile", "rank_snapshots"]
+        tables = ["profile", "rank_snapshots", *MEMORY_TABLES]
         if include_matches:
             tables += ["matches", "timelines", "my_match_stats", "meta"]
         with self._conn:

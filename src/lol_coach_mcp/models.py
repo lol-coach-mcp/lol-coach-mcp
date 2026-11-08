@@ -19,6 +19,9 @@ class CoachContextOut(BaseModel):
     profile: ProfileOut
     last_sync_at: str | None = None
     stored_matches: int = 0
+    goals: list[dict] = []
+    findings: list[dict] = []
+    journal: list[dict] = []
 
 
 class SyncOut(BaseModel):
