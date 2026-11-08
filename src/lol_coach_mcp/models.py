@@ -314,6 +314,7 @@ class BuildReportOut(BaseModel):
     position: str | None = None
     status: str = "ok"
     core_items: list[dict] = []
+    core_buckets: list[dict] = []
     boots: list[dict] = []
     runes: list[dict] = []
     spells: list[dict] = []

@@ -498,6 +498,8 @@ NOTE_CANDIDATE_LIMIT = (
 )
 NOTE_NO_DDRAGON_BUILD = "Data Dragon 데이터를 불러오지 못해 아이템·룬 이름과 조합을 집계하지 못함"
 NOTE_NO_DETAIL = "경기 상세 데이터 없음으로 빌드 집계에서 제외한 판: {n}판"
+NO_COMPARISON = "비교 없음"
+NOTE_DEDUPED = "같은 챔피언으로 해석된 상대는 한 번만 표시함"
 NEED_ENEMIES_MESSAGE = "enemies에 상대 챔피언을 1개 이상 지정해야 함."
 TOO_MANY_ENEMIES_MESSAGE = f"enemies는 최대 {matchups.MAX_ENEMIES}개까지 지정할 수 있음."
 
@@ -542,12 +544,16 @@ def _opgg_matchup_text(o: dict | None) -> str:
     if not o or o.get("status") != champions.STATUS_OK:
         return champions.STATUS_NO_OPGG
     m = o.get("matchup")
-    head = (f"OP.GG 매치업 승률 {_pct1(m['win_rate'])}({m['play']}판)" if m
+    head = (f"OP.GG 매치업 승률 {_pct1(m.get('win_rate'))}({_v(m.get('play'))}판)" if m
             else "OP.GG 매치업 표본 -")
     ov = o["my_champion_overall"]
-    return (f"{head}, 내 챔피언 전체 통계(매치업 아님) 승률 {_pct1(ov['win_rate'])} "
-            f"KDA {_v(ov['kda'])}({_v(ov['play'])}판), 라인 우세 {_v(o['lane_advantage'])}, "
-            f"플레이 스타일 {_v(o['recommended_play_style'])}")
+    text = (f"{head}, 내 챔피언 전체 통계(매치업 아님) 승률 {_pct1(ov['win_rate'])} "
+            f"KDA {_v(ov['kda'])}({_v(ov['play'])}판)")
+    for title, key in (("라인 우세", "lane_advantage"), ("솔로킬 우세", "solo_kill_advantage"),
+                       ("플레이 스타일", "recommended_play_style")):
+        if o.get(key):
+            text += f", {title} {o[key]}"
+    return text
 
 
 def _counter_text(row: dict) -> str:
@@ -609,11 +615,19 @@ def _build_text(out: BuildReportOut) -> str:
     lines = [f"{out.period_desc}, {queue_label(out.queue)}, {out.champion_name} {out.games}판, "
              f"OP.GG 비교 기준: {out.tier_basis}."]
     lines += [n + "." for n in out.notes]
-    for title, groups in (("최종 핵심 아이템", out.core_items), ("신발", out.boots),
-                          ("핵심 룬", out.runes), ("소환사 주문", out.spells)):
+    for title, groups in (("최종 완성 아이템별(군화·재료·소모품·장신구 제외)", out.core_items),
+                          ("신발 조합", out.boots), ("핵심 룬 조합", out.runes),
+                          ("소환사 주문 조합", out.spells)):
         if groups:
-            lines.append(f"{title} 조합:")
+            lines.append(f"{title}:")
             lines += [_build_group_line(g) for g in groups]
+        if groups is out.core_items and out.core_buckets:
+            lines.append("OP.GG 추천 핵심 아이템 보유 개수별:")
+            for b in out.core_buckets:
+                line = (f"{b['of']}개 중 {b['matched']}개: {b['games']}판 {_pct1(b['win_rate'])}")
+                if b["status"] != champions.STATUS_OK:
+                    line += f" [{b['status']}]"
+                lines.append(line)
     if out.opgg is not None:
         lines += _opgg_options_text(out.opgg)
     if out.status != champions.STATUS_OK:
@@ -1437,6 +1451,10 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         played = sorted({e["stats"].champion for e in entries}
                         | {e["opponent"] for e in entries if e["opponent"]})
         resolved = [(q, champions.resolve_champion(q, dd, played)) for q in enemies]
+        deduped = matchups.dedupe_enemies(resolved)
+        if len(deduped) < len(resolved):
+            notes.append(NOTE_DEDUPED)
+        resolved = deduped
         unknown_rows = [
             {"input": q, "enemy": None, "enemy_name": None, "status": matchups.STATUS_UNKNOWN,
              "games": 0, "wins": 0, "win_rate": None, "timeline_games": 0,
@@ -1513,7 +1531,11 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
                     "enemy": k, "enemy_name": champions.display_name(k, dd), **r,
                     "counter": counter, "opgg_status": opgg_status,
                 })
-        rows = matchups.sort_pick_rows(rows) + unknown_rows
+        empty = [r for r in rows if r["games"] == 0]
+        rows = matchups.sort_pick_rows([r for r in rows if r["games"] > 0]) + unknown_rows
+        if empty:
+            notes.append("기록 없음: " + ", ".join(
+                f"{r['candidate_name']} vs {r['enemy_name']}" for r in empty))
         out = MatchupReportOut(
             mode="pick", period_desc=period_desc, queue=CHAMPION_QUEUE, games=len(picked),
             tier_basis=tier_basis, position=main_pos, rows=rows, notes=notes,
@@ -1558,7 +1580,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         games = groups.get(key, [])
         out = BuildReportOut(
             period_desc=period_desc, queue=CHAMPION_QUEUE, games=len(games),
-            tier_basis="전체 티어 기준", champion=key,
+            tier_basis=NO_COMPARISON, champion=key,
             champion_name=champions.display_name(key, dd), notes=notes,
         )
         if not games:
@@ -1616,8 +1638,14 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         def rune_name(i):
             return ((rune_names or {}).get(i) or {}).get("name") or f"룬 {i}"
 
-        out.core_items = finish(core_rows, "핵심 아이템", item_name, "core_items",
-                                lambda g: builds.core_matches(g["ids"]))
+        opts = builds.options(data.get("core_items")) if have else []
+        rec_ids = list(opts[0].get("ids") or []) if opts else []
+        out.core_items = builds.item_stats(core_rows)
+        for g in out.core_items:
+            g["names"] = [item_name(g["ids"][0])]
+            g["opgg_rank"] = None
+            g["overlap"] = (g["ids"][0] in rec_ids) if rec_ids else None
+        out.core_buckets = builds.core_buckets(core_rows, rec_ids) if rec_ids and items else []
         out.boots = finish(boot_rows, "신발", item_name, "boots",
                            lambda g: builds.core_matches(g["ids"]))
         out.runes = finish(rune_rows, "핵심 룬", rune_name, "runes",

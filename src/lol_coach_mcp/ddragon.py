@@ -77,14 +77,17 @@ class DataDragon:
         )
         return latest
 
-    async def _data(self, name: str, transform: Callable[[Any], Any]) -> Any:
+    async def _data(
+        self, name: str, transform: Callable[[Any], Any], cache_name: str | None = None
+    ) -> Any:
         """버전별 데이터. 새 버전 CDN이 아직 없으면(지연·오류) 직전 버전 캐시로 대체.
 
         실제 사용한 버전은 used_versions[name], 대체 여부는 name in fallbacks.
         이전 버전 캐시는 새 버전 데이터를 처음 저장한 뒤에만 지운다.
         """
         v = await self.version()
-        key = f"{name}:{v}"
+        cname = cache_name or name  # 응답 형식이 바뀌면 캐시 이름만 바꿔 이전 캐시를 무시
+        key = f"{cname}:{v}"
         hit = self._store.get_ddragon_cache(key)
         if hit is not None:
             try:
@@ -98,7 +101,7 @@ class DataDragon:
             raw = await self._get_json(f"/cdn/{v}/data/{self._lang}/{name}.json")
             value = transform(raw)
         except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as e:
-            prev = self._store.latest_ddragon_cache(f"{name}:")
+            prev = self._store.latest_ddragon_cache(f"{cname}:")
             if prev is None:
                 if isinstance(e, httpx.HTTPError):
                     raise
@@ -110,7 +113,7 @@ class DataDragon:
         self._store.put_ddragon_cache(
             key, json.dumps(value, ensure_ascii=False), v, self._now().isoformat()
         )
-        self._store.prune_ddragon_cache(v, prefix=f"{name}:")
+        self._store.prune_ddragon_cache(v, prefix=f"{cname}:")
         self._mark(name, v, fallback=False)
         return value
 
@@ -131,15 +134,16 @@ class DataDragon:
         return await self._data("champion", transform)
 
     async def items(self) -> dict[int, dict]:
-        """아이템 id → {name, gold(총액), tags}."""
+        """아이템 id → {name, gold(총액), tags, into(이 아이템으로 만들어지는 아이템 id 목록)}."""
         def transform(raw: dict) -> dict:
             return {
                 item_id: {"name": it.get("name", ""),
                           "gold": (it.get("gold") or {}).get("total"),
-                          "tags": list(it.get("tags", []))}
+                          "tags": list(it.get("tags", [])),
+                          "into": [int(i) for i in it.get("into", [])]}
                 for item_id, it in raw["data"].items()
             }
-        got = await self._data("item", transform)
+        got = await self._data("item", transform, cache_name="item2")
         return {int(k): v for k, v in got.items()}
 
     async def runes(self) -> dict[int, dict]:

@@ -11,6 +11,9 @@ OPGG_OPTION_LIMIT = 3  # 응답에 담는 OP.GG 추천 수
 ITEM_SLOTS = ("item0", "item1", "item2", "item3", "item4", "item5")  # item6은 장신구
 EXCLUDED_TAGS = ("Consumable", "Trinket")
 BOOTS_TAG = "Boots"
+# 서포터 퀘스트 아이템(월드 아틀라스 계열, Data Dragon 16.22 item.json 확인: 태그로 구분할 수 없음)
+SUPPORT_QUEST_IDS = frozenset({3865, 3866, 3867, 3869, 3870, 3871, 3876, 3877})
+ITEM_LIMIT = 10  # 아이템별 통계 표시 수
 
 # 소환사 주문 id → 이름 (Data Dragon summoner.json을 쓰지 않으므로 상수)
 SPELL_NAMES = {
@@ -29,17 +32,44 @@ def participant(match: dict | None, puuid: str) -> dict | None:
 
 
 def split_items(p: dict, items: dict[int, dict]) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    """최종 아이템(item0~5) → (핵심 아이템 id, 신발 id). 소모품·장신구 제외, id 오름차순."""
+    """최종 아이템(item0~5) → (완성 아이템 id, 신발 id), id 오름차순.
+
+    제외: 소모품·장신구, 서포터 퀘스트 아이템, 재료(Data Dragon `into`가 비어 있지 않음).
+    신발은 태그로 먼저 구분한다(신발도 상위 신발의 재료이므로).
+    """
     core, boots = set(), set()
     for slot in ITEM_SLOTS:
         iid = p.get(slot) or 0
-        if not iid:
+        if not iid or iid in SUPPORT_QUEST_IDS:
             continue
-        tags = (items.get(iid) or {}).get("tags", [])
+        info = items.get(iid) or {}
+        tags = info.get("tags", [])
         if any(t in tags for t in EXCLUDED_TAGS):
             continue
-        (boots if BOOTS_TAG in tags else core).add(iid)
+        if BOOTS_TAG in tags:
+            boots.add(iid)
+        elif not info.get("into"):
+            core.add(iid)
     return tuple(sorted(core)), tuple(sorted(boots))
+
+
+def item_stats(rows: list[tuple[tuple, bool]]) -> list[dict]:
+    """(완성 아이템 id 묶음, 승리 여부) → 아이템별 판수·승률. 판수 내림차순, 상위 ITEM_LIMIT개."""
+    per = tally([((iid,), win) for ids, win in rows for iid in ids])
+    return per[:ITEM_LIMIT]
+
+
+def core_buckets(rows: list[tuple[tuple, bool]], opgg_ids: list[int]) -> list[dict]:
+    """내 최종 아이템에 OP.GG 추천 핵심 아이템이 몇 개 있는지(0~전체)별 판수·승률."""
+    want = set(opgg_ids)
+    acc = {n: [0, 0] for n in range(len(want) + 1)}
+    for ids, win in rows:
+        a = acc[len(want & set(ids))]
+        a[0] += 1
+        a[1] += int(win)
+    return [{"matched": n, "of": len(want), "games": g, "wins": w,
+             "win_rate": round(w / g, 3) if g else None, "status": group_status(g)}
+            for n, (g, w) in acc.items()]
 
 
 def keystone_id(p: dict) -> int | None:

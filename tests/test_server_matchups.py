@@ -14,15 +14,17 @@ DD_FULL = {
     "Nami": {"id": 267, "name": "나미", "tags": ["Support", "Mage"]},
 }
 ITEMS = {
-    3031: {"name": "무한의 대검", "gold": 3450, "tags": ["Damage"]},
-    3036: {"name": "도미닉 경의 인사", "gold": 3000, "tags": ["Damage"]},
-    3094: {"name": "속사포", "gold": 2600, "tags": ["Damage"]},
-    3085: {"name": "루난의 허리케인", "gold": 2600, "tags": ["Damage"]},
-    3046: {"name": "유령 무희", "gold": 2600, "tags": ["Damage"]},
-    3006: {"name": "광전사의 군화", "gold": 1100, "tags": ["Boots"]},
-    3009: {"name": "신속의 장화", "gold": 900, "tags": ["Boots"]},
-    2003: {"name": "체력 물약", "gold": 50, "tags": ["Consumable"]},
-    3340: {"name": "수호자의 와드", "gold": 0, "tags": ["Trinket"]},
+    3031: {"name": "무한의 대검", "gold": 3450, "tags": ["Damage"], "into": []},
+    3036: {"name": "도미닉 경의 인사", "gold": 3000, "tags": ["Damage"], "into": []},
+    3094: {"name": "속사포", "gold": 2600, "tags": ["Damage"], "into": []},
+    3085: {"name": "루난의 허리케인", "gold": 2600, "tags": ["Damage"], "into": []},
+    3046: {"name": "유령 무희", "gold": 2600, "tags": ["Damage"], "into": []},
+    1037: {"name": "곡괭이", "gold": 875, "tags": ["Damage"], "into": [3031]},  # 재료 아이템
+    3865: {"name": "세계 지도집", "gold": 400, "tags": ["Vision"], "into": []},  # 서폿 퀘스트
+    3006: {"name": "광전사의 군화", "gold": 1100, "tags": ["Boots"], "into": [3172]},
+    3009: {"name": "신속의 장화", "gold": 900, "tags": ["Boots"], "into": []},
+    2003: {"name": "체력 물약", "gold": 50, "tags": ["Consumable"], "into": []},
+    3340: {"name": "수호자의 와드", "gold": 0, "tags": ["Trinket"], "into": []},
 }
 RUNES = {
     8008: {"name": "치명적 속도", "key": "LethalTempo", "tree": "정밀"},
@@ -144,7 +146,7 @@ async def _call(store, tool, args, *, opgg=None, dd=None, riot=None):
         return await c.call_tool(tool, args)
 
 
-CORE_A = (3031, 3036, 3094, 3006, 2003)  # 군화·소모품이 섞인 최종 아이템
+CORE_A = (3031, 3036, 3094, 3006, 2003, 1037)  # 군화·소모품·재료가 섞인 최종 아이템
 CORE_B = (3031, 3085, 3094, 3009)
 
 
@@ -180,16 +182,23 @@ async def test_build_groups_overlap_and_hold(store):
     sc = r.structured_content
     assert sc["champion"] == "Kaisa" and sc["champion_name"] == "카이사" and sc["games"] == 11
     assert opgg.analysis_calls == [("KAISA", "adc", "gold")]
-    core = {tuple(g["ids"]): g for g in sc["core_items"]}
-    a = core[(3031, 3036, 3094)]  # 군화·소모품·와드 제외
-    assert a["games"] == 6 and a["wins"] == 4 and a["win_rate"] == 0.667
-    assert a["names"] == ["무한의 대검", "도미닉 경의 인사", "속사포"]
-    assert a["status"] == "ok" and a["opgg_rank"] == 1 and a["overlap"] is True
-    b = core[(3031, 3085, 3094)]
-    assert b["games"] == 3 and b["status"] == "ok" and b["opgg_rank"] is None and b["overlap"] is False
-    c = core[(3031, 3046)]
-    assert c["games"] == 2 and c["status"] == "판단 보류" and c["overlap"] is False
-    assert [g["games"] for g in sc["core_items"]] == [6, 3, 2]
+    # 아이템별: 군화·소모품·장신구·재료(into 있음)·서폿 퀘스트 아이템 제외
+    items = {g["ids"][0]: g for g in sc["core_items"]}
+    assert set(items) == {3031, 3036, 3094, 3085, 3046}
+    i31 = items[3031]
+    assert i31["games"] == 11 and i31["wins"] == 7 and i31["win_rate"] == 0.636
+    assert i31["names"] == ["무한의 대검"] and i31["status"] == "ok" and i31["overlap"] is True
+    assert items[3085]["games"] == 3 and items[3085]["overlap"] is False
+    assert items[3046]["games"] == 2 and items[3046]["status"] == "판단 보류"
+    assert [g["games"] for g in sc["core_items"]] == sorted(
+        (g["games"] for g in sc["core_items"]), reverse=True)
+    # OP.GG 핵심 3개 중 내 최종 아이템에 몇 개 있는지
+    bk = {b["matched"]: b for b in sc["core_buckets"]}
+    assert set(bk) == {0, 1, 2, 3} and bk[3]["of"] == 3
+    assert bk[3]["games"] == 6 and bk[3]["wins"] == 4 and bk[3]["status"] == "ok"
+    assert bk[2]["games"] == 3 and bk[2]["wins"] == 1
+    assert bk[1]["games"] == 2 and bk[1]["status"] == "판단 보류"
+    assert bk[0]["games"] == 0 and bk[0]["win_rate"] is None and bk[0]["status"] == "판단 보류"
     boots = {tuple(g["ids"]): g for g in sc["boots"]}
     assert boots[(3006,)]["games"] == 8 and boots[(3006,)]["overlap"] is True
     assert boots[(3009,)]["games"] == 3 and boots[(3009,)]["overlap"] is False
@@ -212,7 +221,7 @@ async def test_build_opgg_down_keeps_my_data(store):
     _seed_builds(store)
     r = await _call(store, "build_report", {"champion": "Kaisa"}, opgg=DownOpgg())
     sc = r.structured_content
-    assert not r.is_error and sc["core_items"][0]["games"] == 6
+    assert not r.is_error and sc["core_items"][0]["games"] == 11 and sc["core_buckets"] == []
     assert sc["opgg"] == {"status": "OP.GG 데이터 없음"}
     assert all(g["overlap"] is None for g in sc["core_items"] + sc["runes"] + sc["spells"])
     assert "OP.GG 데이터 없음" in r.content[0].text
@@ -344,21 +353,20 @@ async def test_matchup_pick_mode_rows_sorted_and_counters(store):
     known = [x for x in sc["rows"] if x.get("candidate")]
     # 정렬: 내 판수 내림차순, 같으면 승률 내림차순
     order = [(x["candidate"], x["enemy"]) for x in known]
-    assert order == [("Jinx", "Ezreal"), ("Kaisa", "Ezreal"), ("Kaisa", "Swain"),
-                     ("Jinx", "Swain")]
+    assert order == [("Jinx", "Ezreal"), ("Kaisa", "Ezreal"), ("Kaisa", "Swain")]  # 0판 행 제외
     k_ez = next(x for x in known if x["candidate"] == "Kaisa" and x["enemy"] == "Ezreal")
     assert k_ez["games"] == 5 and k_ez["win_rate"] == 0.8 and k_ez["status"] == "ok"
     assert k_ez["counter"]["relation"] == "상대하기 쉬움" and k_ez["counter"]["my_win_rate"] == 0.54
     k_sw = next(x for x in known if x["candidate"] == "Kaisa" and x["enemy"] == "Swain")
     assert k_sw["counter"]["relation"] == "상대하기 어려움"
     assert k_sw["counter"]["opponent_win_rate"] == 0.69 and k_sw["counter"]["my_win_rate"] == 0.31
-    j_sw = next(x for x in known if x["candidate"] == "Jinx" and x["enemy"] == "Swain")
-    assert j_sw["games"] == 0 and j_sw["status"] == "판단 보류"
+    assert all(x["games"] > 0 for x in known)
+    assert any(n.startswith("기록 없음:") and "징크스 vs 스웨인" in n for n in sc["notes"])
     assert any(x["status"] == "알 수 없는 챔피언" for x in sc["rows"])
     assert sorted(c[0] for c in opgg.analysis_calls) == ["JINX", "KAISA"]
     assert {c[1:] for c in opgg.analysis_calls} == {("adc", "gold")}
     text = r.content[0].text
-    assert "솔로랭크" in text and "판단 보류" in text and "None" not in text
+    assert "솔로랭크" in text and "기록 없음: 징크스 vs 스웨인" in text and "None" not in text
     assert "하세요" not in text and "하라" not in text
 
 
@@ -405,3 +413,57 @@ def test_pure_helpers():
     assert builds.options({"ids": [1]}) == [{"ids": [1]}] and builds.options(None) == []
     assert builds.opgg_rank(opts, builds.core_matches([2, 9])) == 2  # 목록 형태도 허용
     assert builds.opgg_rank({"ids": [1]}, builds.core_matches([2])) is None
+
+
+async def test_enemies_deduplicated_by_resolved_key(store):
+    _seed_matchups(store)
+    opgg = MatchupOpgg()
+    r = await _call(store, "matchup_report",
+                    {"enemies": ["이즈리얼", "Ezreal", "없는챔프", "없는챔프", "룰루"],
+                     "my_champion": "카이사"}, opgg=opgg)
+    sc = r.structured_content
+    assert [x["input"] for x in sc["rows"]] == ["이즈리얼", "없는챔프", "룰루"]
+    assert opgg.matchup_calls == [("adc", "KAISA", "EZREAL"), ("adc", "KAISA", "LULU")]
+
+
+async def test_lane_labels_korean_and_unknown_omitted(store):
+    _seed_matchups(store)
+    m = {**MATCHUP, "lane_advantage_champion": "카이사", "lane_solo_kill_advantage_champion": "???",
+         "recommended_play_style": "zzz"}
+    r = await _call(store, "matchup_report", {"enemies": ["이즈리얼"], "my_champion": "카이사"},
+                    opgg=MatchupOpgg(matchup=m))
+    row = r.structured_content["rows"][0]["opgg"]
+    assert row["lane_advantage"] == "내 챔피언 우세"
+    assert row["solo_kill_advantage"] is None and row["recommended_play_style"] is None
+    text = r.content[0].text
+    assert "내 챔피언 우세" in text and "???" not in text and "zzz" not in text
+    r = await _call(store, "matchup_report", {"enemies": ["이즈리얼"], "my_champion": "카이사"})
+    assert "라인 우세 비슷함" in r.content[0].text and "EVEN" not in r.content[0].text
+
+
+async def test_matchup_and_build_texts_never_print_none(store):
+    _seed_builds(store)
+    _seed_matchups(store)
+    m = {**MATCHUP, "matchup": {"play": None, "win": None, "win_rate": None},
+         "average_stats": {"play": None, "win_rate": None, "kda": None, "tier": None},
+         "lane_advantage_champion": None, "recommended_play_style": None}
+    an = {**OPGG_ANALYSIS,
+          "core_items": {"ids": [3031], "ids_names": None, "play": None, "win": None},
+          "boots": {"ids": [3006], "ids_names": None, "play": None, "win": None},
+          "runes": {"primary_page_name": None, "primary_rune_names": None, "play": None, "win": None},
+          "summoner_spells": {"ids": [4, 7], "play": None, "win": None}}
+    opgg = MatchupOpgg(matchup=m, analysis=an)
+    for tool, args in (("matchup_report", {"enemies": ["이즈리얼", "룰루"], "my_champion": "카이사"}),
+                       ("matchup_report", {"enemies": ["이즈리얼", "룰루"]}),
+                       ("build_report", {"champion": "카이사"})):
+        r = await _call(store, tool, args, opgg=opgg)
+        assert not r.is_error, (tool, r.content[0].text)
+        assert "None" not in r.content[0].text, (tool, args)
+
+
+async def test_build_no_games_tier_basis_not_claimed(store):
+    _seed_builds(store)
+    r = await _call(store, "build_report", {"champion": "나미"})
+    sc = r.structured_content
+    assert sc["games"] == 0 and sc["tier_basis"] == "비교 없음"
+    assert "전체 티어" not in r.content[0].text

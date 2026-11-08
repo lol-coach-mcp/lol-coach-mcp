@@ -14,6 +14,10 @@ GOLD_DIFF_MINUTE = 15
 
 STATUS_UNKNOWN = "알 수 없는 챔피언"
 STATUS_NOT_QUERIED = "OP.GG 조회 제외"
+ADVANTAGE_EVEN = "비슷함"
+ADVANTAGE_MINE = "내 챔피언 우세"
+ADVANTAGE_THEIRS = "상대 우세"
+PLAY_STYLE_LABELS = {"even": "비슷함", "aggressive": "공격적", "defensive": "수비적"}
 RELATION_EASY = "상대하기 쉬움"
 RELATION_HARD = "상대하기 어려움"
 RELATION_NOT_LISTED = "카운터 목록에 없음"
@@ -78,6 +82,30 @@ def record(
     }
 
 
+def advantage_label(value: str | None, mine: str | None, theirs: str | None) -> str | None:
+    """OP.GG 우세 값(EVEN 또는 챔피언 이름) → 한국어 라벨. 알 수 없으면 None(표시 생략)."""
+    if not value:
+        return None
+    if value.upper() == "EVEN":
+        return ADVANTAGE_EVEN
+    if mine and value == mine:
+        return ADVANTAGE_MINE
+    if theirs and value == theirs:
+        return ADVANTAGE_THEIRS
+    return None
+
+
+def dedupe_enemies(resolved: list[tuple[str, str | None]]) -> list[tuple[str, str | None]]:
+    """해석된 키(못 찾은 입력은 정규화한 이름) 기준으로 중복 제거, 첫 입력 순서 유지."""
+    seen, out = set(), []
+    for q, k in resolved:
+        ident = k if k is not None else "?" + champions._norm(q)
+        if ident not in seen:
+            seen.add(ident)
+            out.append((q, k))
+    return out
+
+
 def matchup_block(data: dict | None) -> dict:
     """OP.GG lane_matchup 요약. average_stats는 매치업이 아니라 내 챔피언 전체 통계."""
     if not data:
@@ -90,9 +118,13 @@ def matchup_block(data: dict | None) -> dict:
             "play": avg.get("play"), "win_rate": avg.get("win_rate"),
             "kda": None if avg.get("kda") is None else round(avg["kda"], 2), "tier": avg.get("tier"),
         },
-        "lane_advantage": data.get("lane_advantage_champion"),
-        "solo_kill_advantage": data.get("lane_solo_kill_advantage_champion"),
-        "recommended_play_style": data.get("recommended_play_style"),
+        "lane_advantage": advantage_label(
+            data.get("lane_advantage_champion"), data.get("my_champion"), data.get("opponent_champion")),
+        "solo_kill_advantage": advantage_label(
+            data.get("lane_solo_kill_advantage_champion"), data.get("my_champion"),
+            data.get("opponent_champion")),
+        "recommended_play_style": PLAY_STYLE_LABELS.get(
+            str(data.get("recommended_play_style") or "").lower()),
     }
 
 
