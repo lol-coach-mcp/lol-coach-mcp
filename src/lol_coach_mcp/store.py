@@ -201,9 +201,12 @@ class Store:
             )
 
     def forget_all(self, include_matches: bool = False) -> None:
-        tables = ["profile", "rank_snapshots", "meta"]
+        tables = ["profile", "rank_snapshots"]
         if include_matches:
-            tables += ["matches", "timelines", "my_match_stats"]
+            tables += ["matches", "timelines", "my_match_stats", "meta"]
         with self._conn:
             for t in tables:
                 self._conn.execute(f"DELETE FROM {t}")  # 고정 테이블명, 사용자 입력 아님
+            if not include_matches:
+                # 데이터 소유자 표시는 남겨 다른 계정 등록 시 오염을 막음
+                self._conn.execute("DELETE FROM meta WHERE key <> 'data_owner_puuid'")

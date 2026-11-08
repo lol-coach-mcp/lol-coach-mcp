@@ -89,6 +89,7 @@ async def sync_matches(
         if progress is not None:
             await progress(i, total, f"경기 {i}/{total} 저장")
 
+    store.set_meta("data_owner_puuid", puuid)
     store.set_meta("last_sync_at", datetime.now(timezone.utc).isoformat())
     return SyncResult(
         new_matches=saved,
