@@ -45,6 +45,8 @@ uv sync
 uvx --from git+https://github.com/lol-coach-mcp/lol-coach-mcp lol-coach-mcp
 ```
 
+이 방식은 작업 폴더에 `.env`가 없으므로 아래 클라이언트 설정의 `env`(또는 `-e`)로 `RIOT_API_KEY`를 넘겨야 합니다.
+
 ## 키 설정
 
 1. Riot Developer Portal에 로그인합니다.
@@ -60,7 +62,11 @@ RIOT_API_KEY=RGAPI-xxxxxxxx
 **Claude Code**
 
 ```bash
+# 클론한 폴더 사용 (폴더의 .env에서 키를 읽음)
 claude mcp add lol-coach -- uv --directory /경로/lol-coach-mcp run lol-coach-mcp
+
+# 클론 없이 uvx 사용 (키를 직접 전달)
+claude mcp add lol-coach -e RIOT_API_KEY=RGAPI-xxxxxxxx -- uvx --from git+https://github.com/lol-coach-mcp/lol-coach-mcp lol-coach-mcp
 ```
 
 **Claude Desktop** (`claude_desktop_config.json`)
@@ -71,6 +77,20 @@ claude mcp add lol-coach -- uv --directory /경로/lol-coach-mcp run lol-coach-m
     "lol-coach": {
       "command": "uv",
       "args": ["--directory", "/경로/lol-coach-mcp", "run", "lol-coach-mcp"]
+    }
+  }
+}
+```
+
+`uvx`로 실행하려면 다음처럼 `env`에 키를 넣습니다.
+
+```json
+{
+  "mcpServers": {
+    "lol-coach": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/lol-coach-mcp/lol-coach-mcp", "lol-coach-mcp"],
+      "env": { "RIOT_API_KEY": "RGAPI-xxxxxxxx" }
     }
   }
 }
@@ -89,6 +109,23 @@ claude mcp add lol-coach -- uv --directory /경로/lol-coach-mcp run lol-coach-m
 }
 ```
 
+`uvx`로 실행하려면 다음처럼 `env`에 키를 넣습니다.
+
+```json
+{
+  "mcpServers": {
+    "lol-coach": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/lol-coach-mcp/lol-coach-mcp", "lol-coach-mcp"],
+      "env": { "RIOT_API_KEY": "RGAPI-xxxxxxxx" }
+    }
+  }
+}
+```
+
+데이터는 기본 위치에 저장되며, `LOL_COACH_DATA_DIR` 환경변수로 바꿀 수 있습니다.
+`open_dashboard`가 만드는 HTML 리포트는 그 폴더 아래 `reports/`에 저장됩니다.
+
 ## 사용 예
 
 ```
@@ -102,6 +139,7 @@ claude mcp add lol-coach -- uv --directory /경로/lol-coach-mcp run lol-coach-m
 ## 기준선
 
 티어별 기준선이 배포본에 포함되어 있어 바로 쓸 수 있습니다.
+배포본 기준선은 IRON~DIAMOND만 포함하며, MASTER 이상은 기준선이 없어 "내 승리 판 평균"과 비교합니다.
 직접 수집하려면 다음을 실행합니다. Riot API 호출 제한 때문에 시간이 오래 걸립니다.
 
 ```bash
