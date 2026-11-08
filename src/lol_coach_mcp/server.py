@@ -120,6 +120,30 @@ def _state(ctx: Context) -> AppState:
     return ctx.request_context.lifespan_context
 
 
+async def _load_match(
+    st: AppState, p: Profile, match_id: str
+) -> tuple[dict, MatchStats] | CallToolResult:
+    """저장소에서 경기를 읽고, 없으면 Riot에서 받아 저장함. 실패 시 tool 오류 결과를 반환함."""
+    match = st.store.get_match(match_id)
+    fetched = False
+    if match is None:
+        try:
+            match = await st.riot.get_match(match_id)
+        except RiotError as e:
+            return tool_error(str(e))
+        except httpx.HTTPError:
+            return tool_error(NETWORK_ERROR_MESSAGE)
+        fetched = True
+    try:
+        stats = extract_match_stats(match, p.puuid)
+    except ValueError:
+        return tool_error("이 경기에 내 계정이 참가하지 않았음. match_id를 확인해야 함.")
+    if fetched:
+        st.store.save_match(match_id, match, stats)
+        st.store.set_meta("data_owner_puuid", p.puuid)
+    return match, stats
+
+
 def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPServer:
     factory = state_factory or _default_state
 
@@ -386,23 +410,10 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         p = st.store.get_profile()
         if p is None:
             return tool_error(NO_PROFILE_MESSAGE)
-        match = st.store.get_match(match_id)
-        fetched = False
-        if match is None:
-            try:
-                match = await st.riot.get_match(match_id)
-            except RiotError as e:
-                return tool_error(str(e))
-            except httpx.HTTPError:
-                return tool_error(NETWORK_ERROR_MESSAGE)
-            fetched = True
-        try:
-            stats = extract_match_stats(match, p.puuid)
-        except ValueError:
-            return tool_error("이 경기에 내 계정이 참가하지 않았음. match_id를 확인해야 함.")
-        if fetched:
-            st.store.save_match(match_id, match, stats)
-            st.store.set_meta("data_owner_puuid", p.puuid)
+        loaded = await _load_match(st, p, match_id)
+        if isinstance(loaded, CallToolResult):
+            return loaded
+        match, stats = loaded
         participants = match["info"]["participants"]
         me = next(x for x in participants if x["puuid"] == p.puuid)
         team_members = [x for x in participants if x["teamId"] == me["teamId"]]
