@@ -43,30 +43,29 @@ async def sync_matches(
     with_timeline: bool = True,
     progress: ProgressCallback | None = None,
 ) -> SyncResult:
-    # 1) 새 경기 ID 수집 (최신순, 이미 저장된 ID를 만나면 중단)
+    # 1) 경기 ID 수집 (최신순). 증분이면 최신 limit개 창을 훑어 저장 안 된 것만 취함.
     new_ids: list[str] = []
-    reason = "no_more"
+    window = 0
     start = 0
-    done_paging = False
-    while not done_paging:
+    while True:
         page = await client.get_match_ids(puuid, queue=queue, start=start, count=PAGE_SIZE)
         for mid in page:
-            if store.has_match(mid):
-                if full:
-                    continue  # 전체 동기화: 저장된 ID는 건너뛰고 계속
-                reason = "caught_up"
-                done_paging = True
+            if not full and window >= limit:
                 break
-            new_ids.append(mid)
-            if not full and len(new_ids) >= limit:
-                reason = "limit_reached"
-                done_paging = True
-                break
-        else:
-            if len(page) < PAGE_SIZE:
-                done_paging = True
-            else:
-                start += PAGE_SIZE
+            window += 1
+            if not store.has_match(mid):
+                new_ids.append(mid)
+        if len(page) < PAGE_SIZE or (not full and window >= limit):
+            break
+        start += PAGE_SIZE
+    if full:
+        reason = "no_more"
+    elif not new_ids:
+        reason = "caught_up"
+    elif window >= limit:
+        reason = "limit_reached"
+    else:
+        reason = "no_more"
 
     # 2) 오래된 것부터 저장: 도중에 실패해도 다음 동기화가 빈 구간을 이어받음
     total = len(new_ids)

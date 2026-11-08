@@ -55,15 +55,55 @@ async def test_first_sync_stores_up_to_limit(store):
     assert c.id_calls == [0]
 
 
-async def test_incremental_stops_at_known(store):
+async def test_incremental_fetches_only_missing_in_window(store):
     ids = make_ids(35)
     await sync_matches(FakeClient(ids[5:]), store, PUUID_ME)
     c = FakeClient(ids)
     r = await sync_matches(c, store, PUUID_ME)
     assert r.new_matches == 5
-    assert r.stopped_reason == "caught_up"
+    assert r.stopped_reason == "no_more"  # 35개뿐이라 ID가 먼저 소진됨
     assert len(c.match_calls) == 5
     assert r.total_stored == 35
+
+
+async def test_caught_up_when_nothing_missing(store):
+    ids = make_ids(35)
+    await sync_matches(FakeClient(ids), store, PUUID_ME)
+    c = FakeClient(ids)
+    r = await sync_matches(c, store, PUUID_ME)
+    assert r.new_matches == 0
+    assert r.stopped_reason == "caught_up"
+    assert c.match_calls == []
+
+
+async def test_small_sync_then_larger_limit_backfills(store):
+    ids = make_ids(100)
+    await sync_matches(FakeClient(ids), store, PUUID_ME, limit=10)
+    assert len(store.list_my_stats(include_remakes=True)) == 10
+    c = FakeClient(ids)
+    r = await sync_matches(c, store, PUUID_ME, limit=30)
+    assert r.new_matches == 20
+    assert r.total_stored == 30
+    assert r.stopped_reason == "limit_reached"
+    assert len(c.match_calls) == 20
+
+
+async def test_small_sync_then_default_limit_stores_100(store):
+    ids = make_ids(250)
+    await sync_matches(FakeClient(ids), store, PUUID_ME, limit=10)
+    c = FakeClient(ids)
+    r = await sync_matches(c, store, PUUID_ME)
+    assert r.total_stored == 100
+    assert r.new_matches == 90
+    assert c.id_calls == [0]
+
+
+async def test_id_requests_bounded_by_limit(store):
+    ids = make_ids(500)
+    await sync_matches(FakeClient(ids), store, PUUID_ME, limit=100)
+    c = FakeClient(ids)
+    await sync_matches(c, store, PUUID_ME, limit=150)
+    assert c.id_calls == [0, 100]
 
 
 async def test_full_sync_reads_all_pages(store):
