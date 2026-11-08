@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
 
 import httpx
@@ -12,10 +12,23 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp_types import CallToolResult
 
 from lol_coach_mcp.config import Settings, load_settings
-from lol_coach_mcp.models import CoachContextOut, ProfileOut, SyncOut
+from lol_coach_mcp.models import (
+    CoachContextOut,
+    DetailPlayerOut,
+    DetailTeamOut,
+    MasteryOut,
+    MatchDetailOut,
+    MatchHistoryOut,
+    MatchRowOut,
+    PlayerProfileOut,
+    ProfileOut,
+    RankOut,
+    SyncOut,
+)
 from lol_coach_mcp.results import tool_error, tool_result
 from lol_coach_mcp.riot.client import RiotClient
 from lol_coach_mcp.riot.errors import RiotError
+from lol_coach_mcp.stats import MatchStats, extract_match_stats, kda, match_tags, recent_form
 from lol_coach_mcp.store import Profile, Store
 from lol_coach_mcp.sync import sync_matches as run_sync
 
@@ -32,7 +45,12 @@ RIOT_ID_FORMAT_ERROR = (
     'Riot ID 형식이 올바르지 않음. "이름#태그" 형태로 "#" 하나와 이름, 태그가 모두 필요함.'
 )
 
-INSTRUCTIONS = "롤 개인 코칭 서버. 대화 시작 시 get_coach_context 호출"
+KST = timezone(timedelta(hours=9))
+QUEUE_NAMES = {"RANKED_SOLO_5x5": "솔로랭크", "RANKED_FLEX_SR": "자유랭크"}
+PROFILE_QUEUE = 420
+MAX_HISTORY_COUNT = 50
+
+INSTRUCTIONS ="롤 개인 코칭 서버. 대화 시작 시 get_coach_context 호출"
 
 
 @dataclass
@@ -68,6 +86,27 @@ def _profile_out(p: Profile | None) -> ProfileOut:
 
 def _profile_text(p: Profile) -> str:
     return f"계정 {p.game_name}#{p.tag_line} 등록됨. 말투: {p.tone}."
+
+
+def _played_at(game_creation_ms: int) -> str:
+    return datetime.fromtimestamp(game_creation_ms / 1000, tz=KST).isoformat(timespec="seconds")
+
+
+def _result(s: MatchStats) -> str:
+    if s.is_remake:
+        return "다시하기"
+    return "승" if s.win else "패"
+
+
+def _win_rate(wins: int, losses: int) -> float:
+    total = wins + losses
+    return round(wins / total * 100, 1) if total else 0.0
+
+
+def _damage_rank(participants: list[dict], me: dict) -> int:
+    # 딜량 내림차순, 동률은 참가자 순서 우선(안정 정렬)
+    ordered = sorted(participants, key=lambda p: -p.get("totalDamageDealtToChampions", 0))
+    return next(i for i, p in enumerate(ordered, start=1) if p["puuid"] == me["puuid"])
 
 
 def _state(ctx: Context) -> AppState:
@@ -209,6 +248,200 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             stopped_reason=r.stopped_reason,
         )
         text = f"새 경기 {r.new_matches}개 저장함. 저장된 전체 경기 {r.total_stored}개."
+        return tool_result(out, text)
+
+    @mcp.tool()
+    async def get_profile(ctx: Context) -> Annotated[CallToolResult, PlayerProfileOut]:
+        """내 랭크(솔로/자유), 소환사 레벨, 상위 숙련도, 최근 폼을 조회함. 호출 시 랭크 스냅샷을 저장함."""
+        st = _state(ctx)
+        p = st.store.get_profile()
+        if p is None:
+            return tool_error(NO_PROFILE_MESSAGE)
+        try:
+            entries = await st.riot.get_league_entries(p.puuid)
+            summoner = await st.riot.get_summoner(p.puuid)
+            mastery = await st.riot.get_top_mastery(p.puuid, 3)
+        except RiotError as e:
+            return tool_error(str(e))
+        except httpx.HTTPError:
+            return tool_error(NETWORK_ERROR_MESSAGE)
+        st.store.add_rank_snapshot(entries, datetime.now(timezone.utc).isoformat())
+        ranks = [
+            RankOut(
+                queue=QUEUE_NAMES[e["queueType"]],
+                tier=e["tier"],
+                division=e.get("rank", ""),
+                lp=e["leaguePoints"],
+                wins=e["wins"],
+                losses=e["losses"],
+                win_rate=_win_rate(e["wins"], e["losses"]),
+            )
+            for e in entries
+            if e.get("queueType") in QUEUE_NAMES
+        ]
+        form = recent_form(st.store.list_my_stats(queue=PROFILE_QUEUE, limit=20))
+        out = PlayerProfileOut(
+            riot_id=f"{p.game_name}#{p.tag_line}",
+            level=summoner.get("summonerLevel"),
+            ranks=ranks,
+            unranked=not ranks,
+            top_mastery=[
+                MasteryOut(
+                    champion_id=m["championId"],
+                    level=m["championLevel"],
+                    points=m["championPoints"],
+                )
+                for m in mastery
+            ],
+            recent_form=form,
+            queue_used=PROFILE_QUEUE,
+        )
+        head = f"{out.riot_id} 레벨 {out.level}."
+        if ranks:
+            rank_text = " ".join(
+                f"{r.queue} {r.tier} {r.division} {r.lp}LP ({r.wins}승 {r.losses}패, 승률 {r.win_rate}%)."
+                for r in ranks
+            )
+        else:
+            rank_text = "솔로랭크·자유랭크 모두 언랭크."
+        form_text = f"최근 폼: {form['label']} (최근 {form['games']}판 {form['wins']}승)."
+        return tool_result(out, f"{head} {rank_text} {form_text}")
+
+    @mcp.tool()
+    async def get_match_history(
+        ctx: Context,
+        count: int = 10,
+        queue: int | None = 420,
+    ) -> Annotated[CallToolResult, MatchHistoryOut]:
+        """최근 경기 목록(다시하기 포함)을 조회함. count는 1~50, queue 기본 420(솔로랭크). 저장된 경기가 부족하면 먼저 동기화함."""
+        st = _state(ctx)
+        p = st.store.get_profile()
+        if p is None:
+            return tool_error(NO_PROFILE_MESSAGE)
+        count = max(1, min(count, MAX_HISTORY_COUNT))
+        stats = st.store.list_my_stats(queue=queue, limit=count, include_remakes=True)
+        if len(stats) < count:
+            try:
+                await run_sync(st.riot, st.store, p.puuid, queue=queue, limit=count, full=False)
+            except RiotError as e:
+                return tool_error(str(e))
+            except httpx.HTTPError:
+                return tool_error(NETWORK_ERROR_MESSAGE)
+            stats = st.store.list_my_stats(queue=queue, limit=count, include_remakes=True)
+        rows = [
+            MatchRowOut(
+                match_id=s.match_id,
+                played_at=_played_at(s.game_creation),
+                champion=s.champion,
+                position=s.position,
+                result=_result(s),
+                kills=s.kills,
+                deaths=s.deaths,
+                assists=s.assists,
+                kda=kda(s.kills, s.deaths, s.assists),
+                cs=s.cs,
+                cs_per_min=s.cs_per_min,
+                tags=match_tags(s),
+            )
+            for s in stats
+        ]
+        out = MatchHistoryOut(queue_used=queue, matches=rows)
+        if not rows:
+            return tool_result(out, "조회된 경기가 없음.")
+        valid = [r for r in rows if r.result != "다시하기"]
+        wins = sum(1 for r in valid if r.result == "승")
+        remakes = len(rows) - len(valid)
+        lines = [
+            f"최근 {len(rows)}경기: {wins}승 {len(valid) - wins}패"
+            + (f", 다시하기 {remakes}판." if remakes else ".")
+        ]
+        for r in rows:
+            lines.append(
+                f"{r.played_at[:16].replace('T', ' ')} {r.champion} {r.position} {r.result} "
+                f"{r.kills}/{r.deaths}/{r.assists} (KDA {r.kda}) CS {r.cs} ({r.cs_per_min}/분)"
+                + (f" [{', '.join(r.tags)}]" if r.tags else "")
+            )
+        return tool_result(out, "\n".join(lines))
+
+    @mcp.tool()
+    async def get_match_detail(
+        match_id: str, ctx: Context
+    ) -> Annotated[CallToolResult, MatchDetailOut]:
+        """한 경기의 양 팀 전체 참가자 지표와 내 딜량 순위를 조회함. 저장돼 있지 않으면 Riot에서 받아 저장함."""
+        st = _state(ctx)
+        p = st.store.get_profile()
+        if p is None:
+            return tool_error(NO_PROFILE_MESSAGE)
+        match = st.store.get_match(match_id)
+        try:
+            if match is None:
+                match = await st.riot.get_match(match_id)
+                st.store.save_match(match_id, match, extract_match_stats(match, p.puuid))
+            stats = extract_match_stats(match, p.puuid)
+        except RiotError as e:
+            return tool_error(str(e))
+        except httpx.HTTPError:
+            return tool_error(NETWORK_ERROR_MESSAGE)
+        except ValueError:
+            return tool_error("이 경기에 내 계정이 참가하지 않았음. match_id를 확인해야 함.")
+        participants = match["info"]["participants"]
+        me = next(x for x in participants if x["puuid"] == p.puuid)
+        team_members = [x for x in participants if x["teamId"] == me["teamId"]]
+        teams = []
+        for tid in sorted({x["teamId"] for x in participants}):
+            members = [x for x in participants if x["teamId"] == tid]
+            teams.append(
+                DetailTeamOut(
+                    team_id=tid,
+                    win=bool(members[0].get("win", False)),
+                    players=[
+                        DetailPlayerOut(
+                            riot_id=(
+                                f"{x['riotIdGameName']}#{x.get('riotIdTagline', '')}"
+                                if x.get("riotIdGameName")
+                                else x.get("summonerName", "")
+                            ),
+                            champion=x["championName"],
+                            position=x.get("teamPosition") or "UNKNOWN",
+                            k=x["kills"],
+                            d=x["deaths"],
+                            a=x["assists"],
+                            damage_to_champions=x.get("totalDamageDealtToChampions", 0),
+                            cs=x.get("totalMinionsKilled", 0) + x.get("neutralMinionsKilled", 0),
+                            is_me=x["puuid"] == p.puuid,
+                        )
+                        for x in members
+                    ],
+                )
+            )
+        rank_team = _damage_rank(team_members, me)
+        rank_game = _damage_rank(participants, me)
+        out = MatchDetailOut(
+            match_id=match_id,
+            played_at=_played_at(stats.game_creation),
+            queue_id=stats.queue_id,
+            champion=stats.champion,
+            position=stats.position,
+            result=_result(stats),
+            kills=stats.kills,
+            deaths=stats.deaths,
+            assists=stats.assists,
+            kda=kda(stats.kills, stats.deaths, stats.assists),
+            cs=stats.cs,
+            cs_per_min=stats.cs_per_min,
+            tags=match_tags(stats),
+            teams=teams,
+            my_damage_rank_in_team=rank_team,
+            my_damage_rank_in_game=rank_game,
+            damage_share=stats.damage_share,
+            kill_participation=stats.kill_participation,
+        )
+        text = (
+            f"{out.played_at[:16].replace('T', ' ')} {out.champion} {out.position} {out.result}. "
+            f"{out.kills}/{out.deaths}/{out.assists} (KDA {out.kda}), CS {out.cs} ({out.cs_per_min}/분). "
+            f"팀 내 딜량 {rank_team}위, 전체 {rank_game}위, 팀 딜 비중 {round(out.damage_share * 100, 1)}%, "
+            f"킬 관여율 {round(out.kill_participation * 100, 1)}%."
+        )
         return tool_result(out, text)
 
     return mcp
