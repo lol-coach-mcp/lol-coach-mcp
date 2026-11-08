@@ -267,3 +267,23 @@ class HabitsOut(BaseModel):
     win_compare: dict
     status: str
     notes: list[str] = []
+
+
+class ChampionReportOut(BaseModel):
+    mode: str
+    period_desc: str
+    queue: int | None = None
+    games: int
+    tier_basis: str
+    champion: str | None = None
+    champion_name: str | None = None
+    status: str = "ok"
+    rows: list[dict] = []
+    main_candidates: list[dict] = []
+    summary: dict | None = None
+    opgg: dict | None = None
+    counters: dict | None = None
+    pool: dict | None = None
+    similar: dict | None = None
+    progress: list[dict] = []
+    notes: list[str] = []
