@@ -181,3 +181,53 @@ def test_labels_and_aria():
     assert 'aria-label="경기 결과"' in svg.result_strip(["승"])
     assert "aria-label" not in svg.line_chart([{"label": "a", "points": [(0, 1)]}])
     assert 'viewBox="0 0 300 300"' in svg.scatter_on_image([], None, 300.0)
+
+
+def test_negative_bar_value_labels_do_not_collide_with_categories():
+    import re
+    out = svg.bar_chart([("가", -4), ("나", -9), ("다", -1)])
+    vals = [float(y) for y in re.findall(r'<text x="[\d.]+" y="([\d.]+)" text-anchor="middle">-\d', out)]
+    cats = [float(y) for y in re.findall(r'<text x="[\d.]+" y="([\d.]+)" text-anchor="middle">[가나다]', out)]
+    assert len(vals) == 3 and len(cats) == 3
+    assert all(v + 4 < c - 14 for v in vals for c in cats)
+
+
+def test_scatter_korean_label_stays_in_viewbox():
+    import re
+    label = "가나다라마바사아자차"
+    for x in (0, 7435, 14870):
+        out = svg.scatter_on_image([{"x": x, "y": 7000, "label": label}], None, 300)
+        m = re.search(r'<text x="([\d.]+)" y="[\d.]+" text-anchor="(\w+)">' + label, out)
+        lx, anchor = float(m.group(1)), m.group(2)
+        w = svg._text_w(label)
+        left, right = (lx, lx + w) if anchor == "start" else (lx - w, lx)
+        assert left >= 0 and right <= 300
+
+
+def test_ascii_width_estimate_smaller_than_korean():
+    assert svg._text_w("abc") == 24 and svg._text_w("가나") == 28
+
+
+def test_result_strip_cell_coerced():
+    assert 'viewBox="0 0 24 22"' in svg.result_strip(["승"], cell=22.0)
+
+
+def test_legend_items_do_not_overlap_horizontally():
+    import re
+    labels = ["첫번째 시리즈", "second", "세번째 시리즈 길게", "d"]
+    series = [{"label": l, "points": [(0, i), (1, i + 1)]} for i, l in enumerate(labels)]
+    out = svg.line_chart(series, width=500)
+    rects = [(float(x), float(y)) for x, y in re.findall(r'<rect class="legend-s\d" x="([\d.]+)" y="([\d.]+)"', out)]
+    assert len(rects) == 4
+    for i in range(3):
+        (x0, y0), (x1, y1) = rects[i], rects[i + 1]
+        if y0 == y1:
+            assert x1 >= x0 + 18 + svg._text_w(labels[i])
+    assert all(x + 18 + svg._text_w(l) <= 500 for (x, _), l in zip(rects, labels))
+
+
+def test_safehtml_add():
+    a, b = render.SafeHtml("<a>"), render.SafeHtml("<b>")
+    assert isinstance(a + b, render.SafeHtml)
+    assert not isinstance(a + "<script>", render.SafeHtml)
+    assert not isinstance("x" + a, render.SafeHtml)

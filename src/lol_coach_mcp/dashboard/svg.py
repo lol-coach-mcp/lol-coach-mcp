@@ -11,7 +11,9 @@ PAD_L, PAD_R, PAD_B = 48, 12, 44
 YLABEL_ROW = 20
 LEGEND_ROW = 20
 LEGEND_SWATCH = 12
-CHAR_W = 15  # 14px 글꼴 기준 보수적 글자 폭(한글 포함)
+CHAR_W_WIDE = 14  # 14px 글꼴 기준 비ASCII(한글 등) 글자 폭
+CHAR_W_ASCII = 8
+BAR_PAD_B = 60  # 막대 값 라벨(음수) 아래에 범주 라벨 공간 확보
 MARKER_MAX_POINTS = 40
 SERIES_CLASSES = ("s0", "s1", "s2", "s3")
 STRIP_CLASS = {"승": "result-win", "패": "result-loss", "다시하기": "result-remake"}
@@ -23,6 +25,11 @@ def _f(v: float) -> str:
 
 def _e(v: Any) -> str:
     return escape(str(v))
+
+
+def _text_w(text: Any) -> int:
+    """글자 폭 보수적 추정(px)."""
+    return sum(CHAR_W_WIDE if ord(c) > 127 else CHAR_W_ASCII for c in str(text))
 
 
 def _aria(label: Any) -> str:
@@ -45,7 +52,7 @@ def _legend(series: Sequence[dict], width: int) -> tuple[list[str], int]:
     limit = width - PAD_R
     for i, s in enumerate(series):
         label = str(s.get("label", ""))
-        item_w = LEGEND_SWATCH + 6 + len(label) * CHAR_W + 16
+        item_w = LEGEND_SWATCH + 6 + _text_w(label) + 16
         if x > PAD_L and x + item_w > limit:
             x, row = PAD_L, row + 1
         y = row * LEGEND_ROW
@@ -145,8 +152,8 @@ def bar_chart(
         hi = lo + 1.0
     top = (YLABEL_ROW if y_label else 0) + 18
     pw = width - PAD_L - PAD_R
-    ph = max(height - top - PAD_B, 60)
-    height = top + ph + PAD_B
+    ph = max(height - top - BAR_PAD_B, 60)
+    height = top + ph + BAR_PAD_B
     slot = pw / n
     bw = slot * 0.7
     zero_y = top + ph * hi / (hi - lo)
@@ -169,7 +176,7 @@ def bar_chart(
             f'<text x="{_f(x + bw / 2)}" y="{_f(vy)}" text-anchor="middle">{_e(_f(value))}</text>'
         )
         out.append(
-            f'<text x="{_f(x + bw / 2)}" y="{top + ph + 16}" text-anchor="middle">{_e(label)}</text>'
+            f'<text x="{_f(x + bw / 2)}" y="{top + ph + 32}" text-anchor="middle">{_e(label)}</text>'
         )
     if x_label:
         out.append(
@@ -193,10 +200,13 @@ def scatter_on_image(
     for p in points:
         px, py = map_to_pixel(p["x"], p["y"], size)
         label = str(p.get("label", ""))
-        if px + 8 + len(label) * CHAR_W * 0.6 > size:
+        w = _text_w(label)
+        if px + 8 + w <= size:
+            lx, anchor = px + 8, "start"
+        elif px - 8 - w >= 0:
             lx, anchor = px - 8, "end"
         else:
-            lx, anchor = px + 8, "start"
+            lx, anchor = max(0, size - w), "start"
         out.append(
             f'<circle class="dot" cx="{_f(px)}" cy="{_f(py)}" r="5"><title>{_e(label)}</title></circle>'
             f'<text x="{_f(lx)}" y="{_f(py + 4)}" text-anchor="{anchor}">{_e(label)}</text>'
@@ -206,6 +216,7 @@ def scatter_on_image(
 
 
 def result_strip(results: Sequence[str], cell: int = 22) -> SafeHtml:
+    cell = int(cell)
     if not results:
         return empty_state("최근 경기 없음")
     width = len(results) * (cell + 2)

@@ -56,6 +56,10 @@ class SafeHtml(str):
 
     __slots__ = ()
 
+    def __add__(self, other: str) -> str:  # type: ignore[override]
+        joined = str.__add__(self, other)
+        return SafeHtml(joined) if isinstance(other, SafeHtml) else str(joined)
+
 
 def empty_state(message: str) -> SafeHtml:
     return SafeHtml(f'<p class="empty-state">{escape(str(message))}</p>')
