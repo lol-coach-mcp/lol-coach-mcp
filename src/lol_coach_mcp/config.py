@@ -50,7 +50,7 @@ def load_settings(
     if not key:
         raise ConfigError(
             "RIOT_API_KEY가 설정되지 않음. 환경 변수 또는 .env 파일에 "
-            "RIOT_API_KEY를 설정하세요."
+            "RIOT_API_KEY를 설정해야 함."
         )
     data_dir_raw = get("LOL_COACH_DATA_DIR")
     data_dir = Path(data_dir_raw) if data_dir_raw else _default_data_dir()

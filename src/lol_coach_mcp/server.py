@@ -24,6 +24,14 @@ NO_PROFILE_MESSAGE = (
 )
 NETWORK_ERROR_MESSAGE = "Riot 서버에 연결하지 못함. 네트워크 상태를 확인한 뒤 다시 시도해야 함."
 
+NO_PROFILE_GUIDE_TEXT = (
+    '등록된 계정이 없음. my_profile(action="set", riot_id="이름#태그")로 등록할 수 있음.'
+)
+
+RIOT_ID_FORMAT_ERROR = (
+    'Riot ID 형식이 올바르지 않음. "이름#태그" 형태로 "#" 하나와 이름, 태그가 모두 필요함.'
+)
+
 INSTRUCTIONS = "롤 개인 코칭 서버. 대화 시작 시 get_coach_context 호출"
 
 
@@ -101,7 +109,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             if action == "get":
                 p = st.store.get_profile()
                 if p is None:
-                    return tool_error(NO_PROFILE_MESSAGE)
+                    return tool_result(_profile_out(None), NO_PROFILE_GUIDE_TEXT)
                 return tool_result(_profile_out(p), _profile_text(p))
 
             if action == "forget":
@@ -111,28 +119,30 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
 
             # set
             p = st.store.get_profile()
+            notice = ""
             if riot_id is not None:
-                if "#" not in riot_id:
-                    return tool_error('Riot ID 형식이 올바르지 않음. "이름#태그" 형태로 "#"를 포함해야 함.')
-                name, _, tag = riot_id.rpartition("#")
+                name, sep, tag = riot_id.partition("#")
                 name, tag = name.strip(), tag.strip()
+                if not sep or "#" in tag:
+                    return tool_error(RIOT_ID_FORMAT_ERROR)
                 if not name or not tag:
-                    return tool_error('Riot ID 형식이 올바르지 않음. "이름#태그" 형태로 이름과 태그가 모두 필요함.')
+                    return tool_error(RIOT_ID_FORMAT_ERROR)
                 account = await st.riot.get_account_by_riot_id(name, tag)
+                new_name = account.get("gameName", name)
+                new_tag = account.get("tagLine", tag)
+                if p is not None and p.puuid != account["puuid"]:
+                    st.store.forget_all(include_matches=True)
+                    p = None
+                    notice = " 이전 계정의 저장 데이터가 삭제됨."
                 if p is None:
                     p = Profile(
                         puuid=account["puuid"],
-                        game_name=account.get("gameName", name),
-                        tag_line=account.get("tagLine", tag),
+                        game_name=new_name,
+                        tag_line=new_tag,
                         registered_at=datetime.now(timezone.utc).isoformat(),
                     )
                 else:
-                    p = replace(
-                        p,
-                        puuid=account["puuid"],
-                        game_name=account.get("gameName", name),
-                        tag_line=account.get("tagLine", tag),
-                    )
+                    p = replace(p, game_name=new_name, tag_line=new_tag)
             elif p is None:
                 return tool_error(NO_PROFILE_MESSAGE)
 
@@ -148,7 +158,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             }
             p = replace(p, **updates)
             st.store.save_profile(p)
-            return tool_result(_profile_out(p), _profile_text(p))
+            return tool_result(_profile_out(p), _profile_text(p) + notice)
         except RiotError as e:
             return tool_error(str(e))
         except httpx.HTTPError:

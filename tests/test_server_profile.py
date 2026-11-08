@@ -20,13 +20,14 @@ class FakeRiot:
         self._base = load_fixture("match_normal")
         self._tl = load_fixture("timeline_normal")
         self.closed = False
+        self.puuids = {"다른사람": "puuid-other"}
 
     async def get_account_by_riot_id(self, game_name, tag_line):
         if self.mode == "403":
             raise RiotAuthError()
         if self.mode == "network":
             raise httpx.ConnectTimeout("timeout")
-        return {"puuid": PUUID, "gameName": game_name, "tagLine": tag_line}
+        return {"puuid": self.puuids.get(game_name, PUUID), "gameName": game_name, "tagLine": tag_line}
 
     async def get_match_ids(self, puuid, *, queue=None, start=0, count=100, start_time=None):
         return self.ids[start : start + min(count, 100)]
@@ -162,3 +163,39 @@ async def test_text_content_is_korean_summary(store):
         text = res.content[0].text
         assert not text.startswith("{")
         assert "격려" in text
+
+
+async def test_get_without_profile_is_not_error(store):
+    async with Client(make_server(store)) as c:
+        r = await c.call_tool("my_profile", {"action": "get"})
+    assert not r.is_error
+    assert r.structured_content["registered"] is False
+    assert "my_profile" in r.content[0].text
+
+
+@pytest.mark.parametrize("bad", ["a#b#c", "#KR1", "이름#", " # "])
+async def test_bad_riot_ids_rejected(store, bad):
+    async with Client(make_server(store)) as c:
+        r = await c.call_tool("my_profile", {"action": "set", "riot_id": bad})
+    assert r.is_error
+    assert "#" in r.content[0].text
+    assert store.get_profile() is None
+
+
+async def test_changing_account_clears_previous_data(store):
+    async with Client(make_server(store)) as c:
+        await c.call_tool("my_profile", {"action": "set", "riot_id": RIOT_ID, "tone": "직설"})
+        await c.call_tool("sync_matches", {})
+        assert store.get_meta("last_sync_at")
+        # 같은 계정 재설정: 데이터 유지
+        await c.call_tool("my_profile", {"action": "set", "riot_id": RIOT_ID})
+        assert len(store.list_my_stats(queue=None, include_remakes=True)) == 3
+        assert store.get_profile().tone == "직설"
+        # 다른 계정: 정리 + 기본값
+        r = await c.call_tool("my_profile", {"action": "set", "riot_id": "다른사람#KR1"})
+    assert not r.is_error
+    assert "삭제됨" in r.content[0].text
+    assert store.list_my_stats(queue=None, include_remakes=True) == []
+    assert store.get_meta("last_sync_at") is None
+    assert store.get_profile().puuid == "puuid-other"
+    assert store.get_profile().tone == "격려"
