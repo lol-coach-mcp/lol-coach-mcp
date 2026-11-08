@@ -98,6 +98,73 @@ def test_default_state_loads_packaged_file(tmp_path, monkeypatch):
         st.store.close()
 
 
+def test_wrong_typed_row_fields_warn_and_preserve_dist_rows(store, caplog):
+    store.upsert_baselines([_row("kda", 1.0, collected_at="2026-10-01T00:00:00+09:00")])
+    bad = _row("deaths")
+    bad["tier"] = ["x"]
+    with caplog.at_level(logging.WARNING):
+        assert loader.load_distributed_baselines(store, _file([_row("assists"), bad])) is False
+    assert caplog.records
+    assert {r["metric"] for r in store.list_baselines(SOURCE_DIST)} == {"kda"}
+
+
+@pytest.mark.parametrize("field,value", [("n", -1), ("n", 1.5), ("std", "x"), ("mean", None),
+                                          ("patch", 16), ("collected_at", 5), ("champion", 3)])
+def test_strict_row_validation(store, caplog, field, value):
+    bad = _row()
+    bad[field] = value
+    with caplog.at_level(logging.WARNING):
+        assert loader.load_distributed_baselines(store, _file([bad])) is False
+    assert store.list_baselines() == []
+
+
+def test_replace_is_atomic_when_insert_fails(store):
+    store.upsert_baselines([_row("kda", 1.0)])
+    with pytest.raises(Exception):
+        store.replace_baselines_by_source(SOURCE_DIST, [{"tier": "GOLD"}])
+    assert {r["metric"] for r in store.list_baselines(SOURCE_DIST)} == {"kda"}
+
+
+def test_startup_survives_corrupt_packaged_file(tmp_path, monkeypatch, caplog):
+    settings = Settings(riot_api_key="k", data_dir=tmp_path, user_agent="t")
+    monkeypatch.setattr(server_mod, "load_settings", lambda: settings)
+    bad = _row()
+    bad["tier"] = ["x"]
+    monkeypatch.setattr(loader, "read_packaged_baselines", lambda: _file([bad]))
+    with caplog.at_level(logging.WARNING):
+        st = server_mod._default_state()
+    try:
+        assert st.store.list_baselines() == [] and caplog.records
+    finally:
+        st.store.close()
+
+
+def test_startup_survives_non_utf8_packaged_file(tmp_path, monkeypatch, caplog):
+    settings = Settings(riot_api_key="k", data_dir=tmp_path, user_agent="t")
+    monkeypatch.setattr(server_mod, "load_settings", lambda: settings)
+    path = tmp_path / "baselines.json"
+    path.write_bytes(b"\xff\xfe\x00bad")
+
+    class _Res:
+        def joinpath(self, *a):
+            return self
+
+        def is_file(self):
+            return True
+
+        def read_text(self, encoding):
+            return path.read_text(encoding=encoding)
+
+    monkeypatch.setattr(loader.resources, "files", lambda pkg: _Res())
+    with caplog.at_level(logging.WARNING):
+        st = server_mod._default_state()
+    try:
+        assert st.store.list_baselines() == []
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
+    finally:
+        st.store.close()
+
+
 # ---- 판정 엔진 연결 ----
 async def test_engine_uses_dist_baseline_and_names_source(store):
     loader.load_distributed_baselines(store, _file([_row("deaths", 3.0)]))

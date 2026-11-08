@@ -358,11 +358,24 @@ async def test_aborts_tier_after_consecutive_failures(store):
     assert any("연속" in m and str(MAX_CONSECUTIVE_FAILURES) in m for m in msgs)
 
 
-async def test_failure_counter_resets_on_successful_ids_call(store):
-    # 매치 호출은 항상 실패하지만 id 조회가 두 번에 한 번 성공하므로 연속 실패가 누적되지 않음
-    c = FakeClient(seeds={("GOLD", "I", 1): 30}, all_fail=True, ids_fail_every=2)
+async def test_match_endpoint_always_failing_aborts_even_if_ids_succeed(store):
+    c = FakeClient(seeds={("GOLD", "I", 1): 30}, all_fail=True)
     await run(c, store, matches_per_tier=50)
+    assert store.get_baseline_job("GOLD")["status"] == "aborted"
+
+
+async def test_id_failures_reset_only_by_id_success(store):
+    # id 조회는 두 번에 한 번 실패(연속 누적 없음), 매치는 모두 성공 -> 중단 없이 소진
+    c = FakeClient(seeds={("GOLD", "I", 1): 30}, ids_fail_every=2)
+    await run(c, store, matches_per_tier=500)
     assert store.get_baseline_job("GOLD")["status"] == "exhausted"
+
+
+async def test_match_failures_reset_by_match_success(store):
+    broken = {f"KR_{i:010d}" for i in range(1, 400) if i % 3}  # 성공이 간간이 섞임
+    c = FakeClient(seeds={("GOLD", "I", 1): 30}, broken_matches=broken)
+    await run(c, store, matches_per_tier=500)
+    assert store.get_baseline_job("GOLD")["status"] != "aborted"
 
 
 def test_cli_reports_aborted_tier_with_exit_3(settings, capsys):

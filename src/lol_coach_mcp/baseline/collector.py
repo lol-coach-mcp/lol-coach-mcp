@@ -106,10 +106,11 @@ async def _collect_tier(
 
     save()
     status = STATUS_INTERRUPTED
-    failures = 0  # 연속 RiotError/HTTP 실패 수(id 조회든 매치 조회든 Riot 호출이 성공하면 0으로 돌아감)
+    # 호출 종류별 연속 실패 수. 같은 종류의 호출이 성공해야만 0으로 돌아가며, 어느 쪽이든 한도에 닿으면 중단
+    failures = {"ids": 0, "match": 0}
 
     def too_many_failures() -> bool:
-        if failures < MAX_CONSECUTIVE_FAILURES:
+        if max(failures.values()) < MAX_CONSECUTIVE_FAILURES:
             return False
         progress(f"[{tier}] 연속 {MAX_CONSECUTIVE_FAILURES}회 호출 실패로 티어 수집을 중단함. "
                  "진행 상태는 저장됨(--resume으로 재시도 가능)")
@@ -127,12 +128,12 @@ async def _collect_tier(
             except RiotAuthError:
                 raise
             except (RiotError, httpx.HTTPError):
-                failures += 1
+                failures["ids"] += 1
                 if too_many_failures():
                     status = STATUS_ABORTED
                     return
                 continue
-            failures = 0
+            failures["ids"] = 0
             complete = True
             for match_id in ids:
                 if matches >= target:
@@ -146,12 +147,12 @@ async def _collect_tier(
                     raise
                 except (RiotError, httpx.HTTPError):
                     complete = False  # 시드를 완료 처리하지 않아 재개 시 다시 시도
-                    failures += 1
+                    failures["match"] += 1
                     if too_many_failures():
                         status = STATUS_ABORTED
                         return
                     continue
-                failures = 0
+                failures["match"] = 0
                 samples = samples_from_match(match, queue)
                 if not samples:
                     store.baseline_mark_seen("skip", match_id, tier)

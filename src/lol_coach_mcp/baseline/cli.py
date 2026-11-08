@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from lol_coach_mcp.baseline.builder import build_baselines, export_baselines
-from lol_coach_mcp.baseline.collector import ALL_TIERS, STATUS_ABORTED, DIVISION_TIERS, QUEUE_NAMES, collect
+from lol_coach_mcp.baseline.collector import (
+    ALL_TIERS, DIVISION_TIERS, QUEUE_NAMES, STATUS_ABORTED, collect,
+)
 from lol_coach_mcp.config import ConfigError, Settings, load_data_dir, load_settings
 from lol_coach_mcp.riot.client import RiotClient
 from lol_coach_mcp.riot.errors import RiotAuthError, RiotError

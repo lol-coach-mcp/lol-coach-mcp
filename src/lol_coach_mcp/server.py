@@ -129,7 +129,7 @@ class AppState:
 def _default_state() -> AppState:
     settings = load_settings()
     store = Store(settings.data_dir / "lol-coach.sqlite3")
-    baseline_loader.load_distributed_baselines(store, baseline_loader.read_packaged_baselines())
+    baseline_loader.load_packaged(store)
     http = httpx.AsyncClient(timeout=10.0)
     return AppState(
         settings=settings,

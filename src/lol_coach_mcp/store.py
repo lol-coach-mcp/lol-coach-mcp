@@ -374,18 +374,21 @@ class Store:
             "collected_at": {"min": rng["lo"], "max": rng["hi"]},
         }
 
+    def _insert_baselines(self, rows: list[dict]) -> None:
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO baselines (tier, position, champion, metric, mean, std, "
+            "n, patch, collected_at, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (r["tier"], r["position"], r.get("champion") or "", r["metric"], r["mean"],
+                 r.get("std"), r.get("n"), r.get("patch"), r.get("collected_at"),
+                 r.get("source") or "")
+                for r in rows
+            ],
+        )
+
     def upsert_baselines(self, rows: list[dict]) -> None:
         with self._conn:
-            self._conn.executemany(
-                "INSERT OR REPLACE INTO baselines (tier, position, champion, metric, mean, std, "
-                "n, patch, collected_at, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    (r["tier"], r["position"], r.get("champion") or "", r["metric"], r["mean"],
-                     r.get("std"), r.get("n"), r.get("patch"), r.get("collected_at"),
-                     r.get("source") or "")
-                    for r in rows
-                ],
-            )
+            self._insert_baselines(rows)
 
     def list_baselines(self, source: str | None = None) -> list[dict]:
         sql, params = "SELECT * FROM baselines", []
@@ -399,7 +402,7 @@ class Store:
         """해당 출처의 기준선 행을 모두 지우고 rows로 교체(한 트랜잭션)."""
         with self._conn:
             self._conn.execute("DELETE FROM baselines WHERE source = ?", (source,))
-        self.upsert_baselines(rows)
+            self._insert_baselines([{**r, "source": source} for r in rows])
 
     # 기준선 수집 진행
     def _baseline_salt(self) -> str:
