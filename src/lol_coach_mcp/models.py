@@ -201,3 +201,25 @@ class ReviewOut(BaseModel):
     vision: VisionOut | None = None
     key_moments: list[MomentOut] | None = None
     notes: list[str] = []
+
+
+class FormOut(BaseModel):
+    period_desc: str
+    games: int
+    queue: int | None = None
+    position: str
+    excluded_other_positions: int
+    compare_to: str
+    compare_used: str
+    ref_source: str
+    rows: list[dict]
+    weaknesses: list[dict]
+    strengths: list[dict]
+    best_self_rows: list[dict] | None = None
+    best_self_ref_source: str | None = None
+    best_self_weaknesses: list[dict] | None = None
+    best_self_strengths: list[dict] | None = None
+    tilt_signals: list[str]
+    style: list[str]
+    records: dict
+    notes: list[str] = []

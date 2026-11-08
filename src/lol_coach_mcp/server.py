@@ -12,12 +12,13 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp_types import CallToolResult
 
 from lol_coach_mcp.config import Settings, load_settings
-from lol_coach_mcp import review
+from lol_coach_mcp import analysis, form, review
 from lol_coach_mcp.models import (
     CoachContextOut,
     DeathOut,
     DetailPlayerOut,
     DetailTeamOut,
+    FormOut,
     LaneOut,
     MasteryOut,
     MatchDetailOut,
@@ -68,6 +69,11 @@ NO_TIMELINE_ME_NOTE = "타임라인에 내 계정이 없음"
 NO_REVIEW_MATCH_MESSAGE = (
     "복기할 솔로랭크 경기가 없음. 경기를 진행한 뒤 sync_matches로 동기화하거나 match_id를 지정해야 함."
 )
+
+FORM_DEFAULT_COUNT = 20
+FORM_MAX_COUNT = 100
+NOTE_NO_RANK_INFO = "현재 티어를 확인하지 못함"
+SOLO_QUEUE_TYPE = "RANKED_SOLO_5x5"
 
 RIOT_DISCLAIMER = (
     "lol-coach-mcp is not endorsed by Riot Games and does not reflect the views or opinions "
@@ -233,6 +239,74 @@ def _review_text(out: ReviewOut) -> str:
         lines.append(f"다시 볼 장면 {len(out.key_moments)}개.")
         for m in out.key_moments:
             lines.append(f"{m.time} {m.reason}")
+    return "\n".join(lines)
+
+
+async def _solo_tier(st: AppState, puuid: str) -> tuple[str | None, str | None]:
+    """현재 솔로랭크 티어와, 티어가 없을 때의 안내 문구를 반환함."""
+    snap = st.store.latest_rank_snapshot()
+    entries = snap[1] if snap else []
+    solo = next((e for e in entries if e.get("queueType") == SOLO_QUEUE_TYPE), None)
+    if solo is None:
+        try:
+            fetched = await st.riot.get_league_entries(puuid)
+        except (RiotError, httpx.HTTPError):
+            return None, form.NOTE_TIER_UNKNOWN
+        entries = [e for e in fetched if e.get("queueType") in QUEUE_NAMES]
+        st.store.add_rank_snapshot(entries, datetime.now(timezone.utc).isoformat())
+        solo = next((e for e in entries if e.get("queueType") == SOLO_QUEUE_TYPE), None)
+    if solo is None:
+        return None, form.NOTE_UNRANKED
+    return str(solo["tier"]), None
+
+
+def _fmt(metric: str, v: float | None) -> str:
+    if v is None:
+        return "없음"
+    return f"{v:.3f}" if metric in analysis.RATE_METRICS else f"{v:.2f}"
+
+
+def _row_text(row: dict) -> str:
+    head = f"{row['label']}: 내 {_fmt(row['metric'], row['my_value'])}({row['my_sample']}판)"
+    if row["status"] != analysis.STATUS_OK:
+        ref = "" if row["ref_value"] is None else f", 기준 {_fmt(row['metric'], row['ref_value'])}"
+        return f"{head}{ref} [{row['status']}]"
+    gap = "큰 차이" if row["strong_gap"] else "뚜렷한 차이" if row["clear_gap"] else "뚜렷하지 않은 차이"
+    return (
+        f"{head}, 기준 {_fmt(row['metric'], row['ref_value'])}({row['ref_sample']}판), "
+        f"차이 {row['difference']:+g}, 오차폭 ±{_fmt(row['metric'], row['margin'])} [{gap}]"
+    )
+
+
+def _finding_text(title: str, items: list[dict]) -> str:
+    if not items:
+        return f"{title}: 없음."
+    return f"{title}: " + ", ".join(f"{r['label']}({r['difference']:+g})" for r in items) + "."
+
+
+def _form_text(out: FormOut) -> str:
+    lines = [
+        f"{out.period_desc}, {queue_label(out.queue)}, 포지션 {out.position}, {out.games}판 분석"
+        + (f" (다른 포지션 {out.excluded_other_positions}판 제외)." if out.excluded_other_positions else ".")
+        + f" 비교 기준: {out.ref_source}.",
+        *[n + "." for n in out.notes],
+    ]
+    lines += [_row_text(r) for r in out.rows]
+    lines.append(_finding_text("약점", out.weaknesses))
+    lines.append(_finding_text("강점", out.strengths))
+    if out.best_self_rows is not None:
+        lines.append(f"참고 비교({out.best_self_ref_source}):")
+        lines += [_row_text(r) for r in out.best_self_rows]
+        lines.append(_finding_text("참고 약점", out.best_self_weaknesses or []))
+        lines.append(_finding_text("참고 강점", out.best_self_strengths or []))
+    lines.append("틸트 신호: " + (", ".join(out.tilt_signals) if out.tilt_signals else "없음") + ".")
+    lines.append("스타일: " + ", ".join(out.style) + ".")
+    recs = [(k, v) for k, v in out.records.items() if k != "updated_by_latest" and v]
+    if recs:
+        lines.append("개인 최고 기록(저장된 솔로랭크 전체):")
+        for k, v in recs:
+            mark = " [최신 경기가 갱신]" if k in out.records.get("updated_by_latest", []) else ""
+            lines.append(f"{v['label']} {v['value']} ({v['champion']}){mark}")
     return "\n".join(lines)
 
 
@@ -686,5 +760,53 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             return tool_error(str(e))
         except httpx.HTTPError:
             return tool_error(NETWORK_ERROR_MESSAGE)
+
+    @mcp.tool()
+    async def analyze_form(
+        ctx: Context,
+        period: Literal["recent_n", "session", "week", "month", "season"] = "recent_n",
+        count: int = FORM_DEFAULT_COUNT,
+        compare_to: Literal["tier_baseline", "best_self", "previous_period"] = "tier_baseline",
+        queue: int | None = 420,
+    ) -> Annotated[CallToolResult, FormOut]:
+        """기간별 폼을 지표별 근거(내 값, 기준, 차이, 오차폭, 판정 상태)로 분석함. period: recent_n/session/week/month/season, compare_to: tier_baseline(티어 기준선, 없으면 내 승리 판 평균 동반)/best_self(내 승리 판 평균)/previous_period(직전 동일 기간). 주 포지션 경기만 분석하며 매번 새 경기를 동기화하고, 실패하면 저장된 데이터 기준으로 응답함."""
+        st = _state(ctx)
+        p = st.store.get_profile()
+        if p is None:
+            return tool_error(NO_PROFILE_MESSAGE)
+        count = max(1, min(count, FORM_MAX_COUNT))
+        sync_notes: list[str] = []
+        try:
+            await run_sync(st.riot, st.store, p.puuid, queue=queue, limit=count, full=False)
+        except (RiotError, httpx.HTTPError) as e:
+            if not st.store.list_my_stats(queue=queue, limit=1, include_remakes=True):
+                if isinstance(e, RiotError):
+                    return tool_error(str(e))
+                return tool_error(NETWORK_ERROR_MESSAGE)
+            sync_notes.append(SYNC_FAILED_NOTE)
+        stats = st.store.list_my_stats(queue=queue, include_remakes=True)
+        tier = tier_note = None
+        if compare_to == "tier_baseline":
+            tier, tier_note = await _solo_tier(st, p.puuid)
+        built = form.build_form(
+            stats,
+            period=period,
+            count=count,
+            compare_to=compare_to,
+            tier=tier,
+            tier_note=tier_note,
+            get_baseline=st.store.get_baseline,
+        )
+        built["notes"] = sync_notes + built["notes"]
+        all_solo = st.store.list_my_stats(queue=analysis.RECORD_QUEUE, include_remakes=True)
+        latest = max(
+            (s for s in all_solo if not s.is_remake), key=lambda s: s.game_creation, default=None
+        )
+        out = FormOut(
+            queue=queue,
+            records=analysis.personal_records(all_solo, latest),
+            **built,
+        )
+        return tool_result(out, _form_text(out))
 
     return mcp
