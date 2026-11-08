@@ -49,18 +49,24 @@ def _stat(created, win=True, remake=False):
     return replace(base, game_creation=created, win=win, is_remake=remake)
 
 
+SHUFFLED_TIMES = [3, 10, 1, 7, 2, 5, 11, 4, 9, 6, 8]  # 10 and 11 are remakes (newest)
+
+
+def _shuffled(win_times):
+    return [_stat(t, win=t in win_times or t >= 10, remake=t >= 10) for t in SHUFFLED_TIMES]
+
+
 def test_recent_form_sorts_and_skips_remakes():
-    stats = [
-        _stat(3, True),
-        _stat(7, False, remake=True),
-        _stat(1, False),  # oldest, falls outside latest 5
-        _stat(5, True),
-        _stat(2, True),
-        _stat(6, False, remake=True),
-        _stat(4, True),
-    ]
-    # valid games by recency: 5(W),4(W),3(W),2(W),1(L) -> 4 wins of 5
-    r = recent_form(stats)
+    # 9 real games (t=1..9) + 2 remakes flagged as wins; the 4 oldest are wins,
+    # the newest 5 (t=5..9) contain exactly 1 win. Input order, oldest-first
+    # order, or counting remakes would each give a different label.
+    r = recent_form(_shuffled({1, 2, 3, 4, 9}))
+    assert r == {"games": 5, "wins": 1, "label": "하락세"}
+
+
+def test_recent_form_newest_five_rising():
+    # Mirror: the 4 oldest are losses, newest 5 have 4 wins.
+    r = recent_form(_shuffled({5, 6, 7, 8}))
     assert r == {"games": 5, "wins": 4, "label": "상승세"}
 
 
