@@ -111,6 +111,13 @@ def round_metric(metric: str, v: float | None) -> float | None:
     return round(v, 3 if metric in RATE_METRICS else 2)
 
 
+def format_metric(metric: str, v: float | None) -> str:
+    """표시용 문자열. 비율 지표 3자리, 나머지 2자리, 없으면 '없음'."""
+    if v is None:
+        return "없음"
+    return f"{v:.3f}" if metric in RATE_METRICS else f"{v:.2f}"
+
+
 class EvidenceRow(dict):
     """판정 근거 행. 그대로 dict(JSON 직렬화 가능)이며, 정렬·방향 판정용 원값을 속성으로 보관."""
 

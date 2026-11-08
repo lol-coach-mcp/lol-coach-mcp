@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -15,6 +16,8 @@ from .store import Store
 DDRAGON_HOST = "https://ddragon.leagueoflegends.com"
 DDRAGON_LANG = "ko_KR"
 VERSION_TTL = timedelta(hours=24)
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+MAP_FILE = "map11"  # 소환사의 협곡 미니맵
 DEFAULT_USER_AGENT = f"lol-coach-mcp/{__version__}"
 _VERSIONS_KEY = "versions"
 
@@ -161,3 +164,28 @@ class DataDragon:
             return out
         got = await self._data("runesReforged", transform)
         return {int(k): v for k, v in got.items()}
+
+    async def map_image(self, cache_dir: Path) -> bytes:
+        """소환사의 협곡 미니맵 PNG. 버전별로 cache_dir에 저장해 재사용함.
+
+        다운로드 실패나 PNG가 아닌 응답이면 httpx.HTTPError.
+        """
+        v = await self.version()
+        path = Path(cache_dir) / f"{MAP_FILE}-{v}.png"
+        try:
+            cached = path.read_bytes()
+        except OSError:
+            cached = b""
+        if cached.startswith(PNG_MAGIC):
+            return cached
+        data = (await self._get_bytes(f"/cdn/{v}/img/map/{MAP_FILE}.png"))
+        if not data.startswith(PNG_MAGIC):
+            raise httpx.DecodingError("Data Dragon 미니맵이 PNG 형식이 아님")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return data
+
+    async def _get_bytes(self, path: str) -> bytes:
+        resp = await self._http.get(DDRAGON_HOST + path, headers=self._headers)
+        resp.raise_for_status()
+        return resp.content

@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import base64
 import re
+import webbrowser
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
 
@@ -20,12 +23,15 @@ from lol_coach_mcp import (
     analysis, builds, champions, explain as explain_mod, form, goals as goals_mod, habits,
     journal as journal_mod, matchups, memory, periods, review, splits,
 )
+from lol_coach_mcp.dashboard import render as dash_render, views as dash_views
+from lol_coach_mcp.dashboard.render import empty_state, kv_list
 from lol_coach_mcp.ddragon import DataDragon
 from lol_coach_mcp.opgg import OpggClient, opgg_champion_key, opgg_position
 from lol_coach_mcp.models import (
     BuildReportOut,
     ChampionReportOut,
     CoachContextOut,
+    DashboardOut,
     DeathOut,
     DetailPlayerOut,
     DetailTeamOut,
@@ -116,6 +122,7 @@ class AppState:
     ddragon: Any = None  # DataDragon 또는 가짜 객체. None이면 Data Dragon 데이터 없음
     http: Any = None  # 기본 팩토리가 만든 httpx.AsyncClient(종료 시 닫음)
     now: Callable[[], datetime] | None = None  # 시계 주입(테스트용). None이면 현재 시각
+    open_url: Callable[[str], bool] = webbrowser.open  # 대시보드를 여는 함수(테스트에서 대체)
 
 
 def _default_state() -> AppState:
@@ -322,10 +329,7 @@ async def _solo_tier(st: AppState, puuid: str) -> tuple[str | None, str | None]:
     return str(solo["tier"]), None
 
 
-def _fmt(metric: str, v: float | None) -> str:
-    if v is None:
-        return "없음"
-    return f"{v:.3f}" if metric in analysis.RATE_METRICS else f"{v:.2f}"
+_fmt = analysis.format_metric
 
 
 def _row_text(row: dict) -> str:
@@ -939,6 +943,227 @@ PROMPT_COMMON = (
 )
 
 
+DASHBOARD_QUEUE = 420
+DASHBOARD_SYNC_COUNT = 20
+DASHBOARD_RESULT_GAMES = 20
+DASHBOARD_FORM_COUNT = 20
+DASHBOARD_VIEW_LABELS = {
+    "overview": "개요", "season": "시즌", "champion": "챔피언", "match": "경기",
+}
+NOTE_NO_MINIMAP = "미니맵 이미지를 받지 못해 단색 배경으로 표시함"
+NOTE_DASH_REMAKE = "다시하기 경기라 타임라인 차트를 그리지 않음"
+NOTE_DASH_NO_GOLD = "라인 상대를 특정하지 못했거나 15분 이전에 끝난 경기라 골드 차를 그릴 수 없음"
+NOTE_DASH_NO_OPGG = "OP.GG 데이터를 불러오지 못해 내 기록만 표시함"
+
+
+async def _timeline_for(
+    st: AppState, p: Profile, match_id: str
+) -> tuple[dict | None, list[str]]:
+    """저장소 또는 Riot에서 타임라인을 읽음. 없거나 내 계정이 없으면 (None, 안내 문구들)."""
+    notes: list[str] = []
+    timeline = st.store.get_timeline(match_id)
+    if timeline is None:
+        try:
+            timeline = await st.riot.get_timeline(match_id)
+        except RiotNotFound:
+            notes.append(NO_TIMELINE_NOTE)
+        else:
+            st.store.save_timeline(match_id, timeline)
+    if timeline is not None:
+        try:
+            review.participant_id(timeline, p.puuid)
+        except ValueError:
+            timeline = None
+            notes.append(NO_TIMELINE_ME_NOTE)
+    return timeline, notes
+
+
+async def _opgg_overview_rows(
+    st: AppState, picked: list[MatchStats], dd: dict | None, tier: str | None
+) -> list[dict]:
+    """챔피언 overview 행 + 판수 상위 챔피언의 OP.GG 비교 블록."""
+    dd_keys = [{"key": k} for k in (dd or {})]
+    rows = champions.overview_rows(picked, dd)
+    top = rows[: champions.OPGG_TOP_N]
+    fetched = await asyncio.gather(*(
+        _opgg_analysis(st, r["champion"], r["position"], tier, dd_keys) for r in top
+    ))
+    for r, data in zip(top, fetched):
+        r["opgg"] = champions.opgg_block(r, data)
+    return rows
+
+
+def _parse_utc(iso: str) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+async def _dash_rank_entries(st: AppState, p: Profile) -> list[dict]:
+    """최신 랭크 조회 후 스냅샷 저장. 실패하면 저장된 최신 스냅샷."""
+    try:
+        fetched = await st.riot.get_league_entries(p.puuid)
+    except (RiotError, httpx.HTTPError):
+        snap = st.store.latest_rank_snapshot()
+        return snap[1] if snap else []
+    entries = [e for e in fetched if e.get("queueType") in QUEUE_NAMES]
+    st.store.add_rank_snapshot(entries, datetime.now(timezone.utc).isoformat())
+    return entries
+
+
+def _dash_lp_rows(st: AppState, p: Profile) -> list[dict]:
+    """등록 이후 솔로랭크 LP 스냅샷 [{at, days, tier, rank, lp}], 시간순."""
+    since = _parse_utc(p.registered_at) if p.registered_at else None
+    rows: list[dict] = []
+    first: datetime | None = None
+    for taken_at, entries in st.store.list_rank_snapshots():
+        t = _parse_utc(taken_at)
+        solo = next((e for e in entries if e.get("queueType") == SOLO_QUEUE_TYPE), None)
+        if t is None or solo is None or (since is not None and t < since):
+            continue
+        first = first or t
+        rows.append({
+            "at": kst_text(taken_at), "days": (t - first).total_seconds() / 86400,
+            "tier": str(solo.get("tier", "")), "rank": str(solo.get("rank", "")),
+            "lp": int(solo.get("leaguePoints", 0)),
+        })
+    return rows
+
+
+def _dash_goal_rows(st: AppState, stats: list[MatchStats]) -> list[dict]:
+    rows = []
+    for g in st.store.list_goals(status=goals_mod.STATUS_ACTIVE):
+        prog = goals_mod.evaluate_goal(g, stats)
+        m = g["metric"]
+        status = "" if prog["status"] == goals_mod.STATUS_ACTIVE else f" ({prog['status']})"
+        rows.append({
+            "label": analysis.METRICS[m][0],
+            "target": f"{_fmt(m, g['target'])} {GOAL_DIRECTION_TEXT[g['direction']]}",
+            "baseline": _fmt(m, g["baseline_value"]),
+            "progress": f"{prog['games_done']}/{prog['games_needed']}판{status}",
+            "current": _fmt(m, prog["current_avg"]),
+        })
+    return rows
+
+
+async def _dash_minimap_uri(st: AppState, notes: list[str]) -> str | None:
+    """Data Dragon 미니맵을 base64 data URI로. 실패하면 None(대체 배경)."""
+    if st.ddragon is None:
+        notes.append(NOTE_NO_MINIMAP)
+        return None
+    try:
+        png = await st.ddragon.map_image(st.settings.data_dir / "cache")
+    except (httpx.HTTPError, OSError):
+        notes.append(NOTE_NO_MINIMAP)
+        return None
+    return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
+
+async def _dash_overview(st: AppState, p: Profile, notes: list[str]) -> list[dict]:
+    entries = await _dash_rank_entries(st, p)
+    stats = st.store.list_my_stats(queue=DASHBOARD_QUEUE, include_remakes=True)
+    tier, tier_note = await _solo_tier(st, p.puuid)
+    form_out = None
+    if stats:
+        form_out = form.build_form(
+            stats, period="recent_n", count=DASHBOARD_FORM_COUNT, compare_to="tier_baseline",
+            tier=tier, tier_note=tier_note, get_baseline=st.store.get_baseline,
+        )
+        notes += form_out["notes"]
+    results = [_result(s) for s in reversed(stats[:DASHBOARD_RESULT_GAMES])]
+    return dash_views.overview_view(
+        riot_id=f"{p.game_name}#{p.tag_line}", rank_entries=entries, results=results,
+        form=form_out, goal_rows=_dash_goal_rows(st, stats),
+        queue_text=queue_label(DASHBOARD_QUEUE),
+    )
+
+
+async def _dash_season(st: AppState, p: Profile, notes: list[str]) -> list[dict]:
+    stats = st.store.list_my_stats(queue=DASHBOARD_QUEUE, include_remakes=True)
+    picked, desc = periods.select(stats, "season", 0)
+    dd = await _ddragon_champions(st)
+    if dd is None:
+        notes.append(NOTE_NO_DDRAGON)
+    return dash_views.season_view(
+        lp_rows=_dash_lp_rows(st, p), chrono=list(reversed(picked)),
+        names={k: v["name"] for k, v in (dd or {}).items()}, period_desc=desc,
+    )
+
+
+async def _dash_champion(st: AppState, p: Profile, notes: list[str]) -> list[dict]:
+    stats = st.store.list_my_stats(queue=DASHBOARD_QUEUE, include_remakes=True)
+    picked, desc = periods.select(stats, "recent_n", CHAMPION_DEFAULT_COUNT)
+    dd = await _ddragon_champions(st)
+    if dd is None:
+        notes.append(NOTE_NO_DDRAGON)
+    tier, _ = await _solo_tier(st, p.puuid)
+    if picked and not tier:
+        notes.append(NOTE_TIER_ALL)
+    rows = await _opgg_overview_rows(st, picked, dd, tier) if picked else []
+    if rows:
+        if len(rows) > champions.OPGG_TOP_N:
+            notes.append(NOTE_OPGG_LIMIT)
+        if all((r.get("opgg") or {}).get("status") != champions.STATUS_OK for r in rows):
+            notes.append(NOTE_DASH_NO_OPGG)
+    return dash_views.champion_view(
+        rows=rows, period_desc=desc, queue_text=queue_label(DASHBOARD_QUEUE)
+    )
+
+
+async def _dash_match(
+    st: AppState, p: Profile, match_id: str | None, notes: list[str]
+) -> list[dict] | CallToolResult:
+    if match_id is None:
+        recent = st.store.list_my_stats(queue=DASHBOARD_QUEUE, limit=1)
+        if not recent:
+            return [dash_views.section("안내", empty_state(dash_views.NO_DATA_GUIDE))]
+        match_id = recent[0].match_id
+    loaded = await _load_match(st, p, match_id)
+    if isinstance(loaded, CallToolResult):
+        return loaded
+    match, stats = loaded
+    summary = [
+        ("챔피언", f"{stats.champion} ({stats.position})"), ("결과", _result(stats)),
+        ("게임 시간", review.mmss(stats.duration_s * 1000)), ("큐", queue_label(stats.queue_id)),
+        ("KDA", f"{stats.kills}/{stats.deaths}/{stats.assists} ({kda(stats.kills, stats.deaths, stats.assists)})"),
+        ("경기 ID", match_id),
+    ]
+    if stats.is_remake:
+        notes.append(NOTE_DASH_REMAKE)
+        return [dash_views.section("경기 요약", kv_list(summary))]
+    timeline, tl_notes = await _timeline_for(st, p, match_id)
+    notes += tl_notes
+    if timeline is None:
+        return dash_views.match_view(
+            summary=summary, gold_points=None, death_points=None, minimap_uri=None,
+            objective_events=None,
+        )
+    lane = review.lane_checkpoints(match, timeline, p.puuid, dash_views.GOLD_DIFF_MINUTES)
+    if not lane["points"]:
+        notes.append(NOTE_DASH_NO_GOLD)
+    deaths = review.death_points(timeline, p.puuid)
+    minimap = await _dash_minimap_uri(st, notes) if deaths else None
+    return dash_views.match_view(
+        summary=summary, gold_points=lane["points"] or None, death_points=deaths,
+        minimap_uri=minimap,
+        objective_events=review.objectives(match, timeline, p.puuid)["events"],
+    )
+
+
+def _dashboard_text(out: DashboardOut, open_browser: bool) -> str:
+    state = (
+        "브라우저로 열었음." if out.opened
+        else "브라우저 열기를 생략함." if not open_browser
+        else "브라우저를 열지 못함. 파일 경로로 직접 열 수 있음."
+    )
+    return (
+        f"대시보드({DASHBOARD_VIEW_LABELS[out.view]}) 파일을 만들었음: {out.path}. "
+        f"섹션: {', '.join(out.sections)}. {state}"
+    )
+
+
 def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPServer:
     factory = state_factory or _default_state
     # 정적 리소스 핸들러는 Context를 받을 수 없으므로 lifespan 상태를 여기에 보관
@@ -1428,20 +1653,8 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
                 assists=stats.assists,
                 kda=kda(stats.kills, stats.deaths, stats.assists),
             )
-            timeline = st.store.get_timeline(match_id)
-            if timeline is None:
-                try:
-                    timeline = await st.riot.get_timeline(match_id)
-                except RiotNotFound:
-                    out.notes.append(NO_TIMELINE_NOTE)
-                else:
-                    st.store.save_timeline(match_id, timeline)
-            if timeline is not None:
-                try:
-                    review.participant_id(timeline, p.puuid)
-                except ValueError:
-                    timeline = None
-                    out.notes.append(NO_TIMELINE_ME_NOTE)
+            timeline, timeline_notes = await _timeline_for(st, p, match_id)
+            out.notes += timeline_notes
             if timeline is None:
                 out.status = "판단 보류"
                 if focus == "overview":
@@ -1997,14 +2210,8 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             return tool_result(out, _champion_text(out))
 
         if mode == "overview":
-            rows = champions.overview_rows(picked, dd)
-            top = rows[: champions.OPGG_TOP_N]
-            fetched = await asyncio.gather(*(
-                _opgg_analysis(st, r["champion"], r["position"], tier, dd_keys) for r in top
-            ))
-            for r, data in zip(top, fetched):
-                r["opgg"] = champions.opgg_block(r, data)
-            if len(rows) > len(top):
+            rows = await _opgg_overview_rows(st, picked, dd, tier)
+            if len(rows) > champions.OPGG_TOP_N:
                 out.notes.append(NOTE_OPGG_LIMIT)
             out.rows = rows
             out.main_candidates = champions.main_candidates(rows)
@@ -2285,5 +2492,63 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             spell_rows, "소환사 주문", lambda i: builds.SPELL_NAMES.get(i, f"소환사 주문 {i}"),
             "summoner_spells", lambda g: builds.spells_match(g["ids"]))
         return tool_result(out, _build_text(out))
+
+    @mcp.tool()
+    async def open_dashboard(
+        ctx: Context,
+        view: Literal["overview", "season", "champion", "match"] = "overview",
+        match_id: str | None = None,
+        open_browser: bool = True,
+    ) -> Annotated[CallToolResult, DashboardOut]:
+        """저장된 데이터로 정적 HTML 대시보드를 만들어 브라우저로 엶. view: overview(프로필·최근 20판·폼 분석·진행 중 과제)/season(LP 추이·10판 이동평균·챔피언별 판수)/champion(챔피언 표·상위 챔피언 지표)/match(골드 차·데스 위치·오브젝트, match_id 생략 시 최근 경기). 파일은 데이터 디렉터리의 reports 폴더에 저장되고 경로를 반환함. open_browser=False면 파일만 만듦. 매번 새 경기를 동기화하고 실패하면 저장된 데이터 기준."""
+        st = _state(ctx)
+        p = st.store.get_profile()
+        if p is None:
+            return tool_error(NO_PROFILE_MESSAGE)
+        try:
+            notes: list[str] = []
+            sync_notes = await _sync_for_analysis(st, p, DASHBOARD_QUEUE, DASHBOARD_SYNC_COUNT)
+            if isinstance(sync_notes, CallToolResult):
+                notes.append(sync_notes.content[0].text)  # 저장된 데이터가 없어도 안내 페이지는 만듦
+            else:
+                notes += sync_notes
+            if view == "overview":
+                sections = await _dash_overview(st, p, notes)
+            elif view == "season":
+                sections = await _dash_season(st, p, notes)
+            elif view == "champion":
+                sections = await _dash_champion(st, p, notes)
+            else:
+                sections = await _dash_match(st, p, match_id, notes)
+                if isinstance(sections, CallToolResult):
+                    return sections
+        except RiotError as e:
+            return tool_error(str(e))
+        except httpx.HTTPError:
+            return tool_error(NETWORK_ERROR_MESSAGE)
+
+        now = _now_kst(st)
+        title = f"{p.game_name}#{p.tag_line} 대시보드 - {DASHBOARD_VIEW_LABELS[view]}"
+        page = dash_render.render_page(
+            title, sections, now.strftime("%Y-%m-%d %H:%M:%S KST"), notes
+        )
+        reports = (Path(st.settings.data_dir) / "reports").resolve()
+        path = reports / f"{view}-{now.strftime('%Y%m%d-%H%M%S')}.html"
+        try:
+            reports.mkdir(parents=True, exist_ok=True)
+            path.write_text(page, encoding="utf-8")
+        except OSError as e:
+            return tool_error(f"대시보드 파일을 저장하지 못함: {e}")
+        opened = False
+        if open_browser:
+            try:
+                opened = bool(st.open_url(path.as_uri()))
+            except Exception:  # noqa: BLE001 — 브라우저 실패는 경로만 반환
+                opened = False
+        out = DashboardOut(
+            path=str(path), view=view, sections=[s["heading"] for s in sections],
+            notes=notes, opened=opened,
+        )
+        return tool_result(out, _dashboard_text(out, open_browser))
 
     return mcp

@@ -212,3 +212,36 @@ async def test_bad_versions_json_uses_stale_and_refreshes_fetched_at(store, http
     clock.now = T0 + timedelta(hours=31)
     assert await dd.version() == "16.22.1"
     assert route.call_count == 2  # 대체 사용 후 TTL 동안 재요청 안 함
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+MAP_URL = f"{DDRAGON_HOST}/cdn/16.22.1/img/map/map11.png"
+
+
+@respx.mock
+async def test_map_image_downloads_once_and_caches(store, http, clock, tmp_path):
+    respx.get(VERSIONS).respond(json=["16.22.1"])
+    route = respx.get(MAP_URL).respond(content=PNG)
+    dd = DataDragon(store, http, user_agent=UA, now=clock)
+    assert await dd.map_image(tmp_path / "cache") == PNG
+    assert route.calls[0].request.headers["User-Agent"] == UA
+    assert (tmp_path / "cache" / "map11-16.22.1.png").read_bytes() == PNG
+    assert await dd.map_image(tmp_path / "cache") == PNG
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_map_image_http_error_raises(store, http, clock, tmp_path):
+    respx.get(VERSIONS).respond(json=["16.22.1"])
+    respx.get(MAP_URL).respond(503)
+    with pytest.raises(httpx.HTTPError):
+        await DataDragon(store, http, user_agent=UA, now=clock).map_image(tmp_path)
+
+
+@respx.mock
+async def test_map_image_rejects_non_png(store, http, clock, tmp_path):
+    respx.get(VERSIONS).respond(json=["16.22.1"])
+    respx.get(MAP_URL).respond(content=b"<html>not png</html>")
+    with pytest.raises(httpx.HTTPError):
+        await DataDragon(store, http, user_agent=UA, now=clock).map_image(tmp_path)
+    assert not list(tmp_path.glob("*.png"))

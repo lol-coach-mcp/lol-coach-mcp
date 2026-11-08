@@ -346,3 +346,16 @@ def test_get_journal_by_id(store):
     a = store.add_journal("2026-11-08T10:00:00+09:00", "KR_1", "첫 메모")
     assert store.get_journal(a)["text"] == "첫 메모"
     assert store.get_journal(a + 100) is None
+
+
+def test_list_rank_snapshots_since_and_order(store):
+    store.add_rank_snapshot([{"tier": "GOLD", "leaguePoints": 10}], "2026-11-03T00:00:00+00:00")
+    store.add_rank_snapshot([{"tier": "GOLD", "leaguePoints": 5}], "2026-11-01T00:00:00+00:00")
+    store.add_rank_snapshot([{"tier": "GOLD", "leaguePoints": 30}], "2026-11-05T00:00:00+00:00")
+    got = store.list_rank_snapshots()
+    assert [t for t, _ in got] == [
+        "2026-11-01T00:00:00+00:00", "2026-11-03T00:00:00+00:00", "2026-11-05T00:00:00+00:00",
+    ]
+    assert got[0][1] == [{"tier": "GOLD", "leaguePoints": 5}]
+    assert store.list_rank_snapshots() == got
+    assert store.list_rank_snapshots(limit=2)[-1][0] == "2026-11-05T00:00:00+00:00"

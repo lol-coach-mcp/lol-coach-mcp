@@ -360,3 +360,11 @@ class BuildReportOut(BaseModel):
     spells: list[dict] = []
     opgg: dict | None = None
     notes: list[str] = []
+
+
+class DashboardOut(BaseModel):
+    path: str
+    view: str
+    sections: list[str]
+    notes: list[str] = []
+    opened: bool

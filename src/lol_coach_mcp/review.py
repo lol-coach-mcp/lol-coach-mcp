@@ -164,6 +164,24 @@ def _my_team_id(match: dict, puuid: str) -> int:
     return int(_me(match, puuid)["teamId"])
 
 
+def _my_death_events(timeline: dict, pid: int) -> list[dict]:
+    return sorted(
+        (e for e in _events(timeline) if e["type"] == "CHAMPION_KILL" and e.get("victimId") == pid),
+        key=lambda e: e["timestamp"],
+    )
+
+
+def death_points(timeline: dict, puuid: str) -> list[dict]:
+    """내 데스 위치(게임 좌표 0~14870): [{ms, time, x, y}], 시간순."""
+    pid = participant_id(timeline, puuid)
+    out = []
+    for e in _my_death_events(timeline, pid):
+        pos = e.get("position") or {}
+        out.append({"ms": int(e["timestamp"]), "time": mmss(e["timestamp"]),
+                    "x": int(pos.get("x", 0)), "y": int(pos.get("y", 0))})
+    return out
+
+
 def deaths(match: dict, timeline: dict, puuid: str) -> list[dict]:
     pid = participant_id(timeline, puuid)
     team_id = _my_team_id(match, puuid)
@@ -173,10 +191,7 @@ def deaths(match: dict, timeline: dict, puuid: str) -> list[dict]:
         for e in _events(timeline)
         if e["type"] == "ELITE_MONSTER_KILL" and _side(team_id, e.get("killerTeamId")) == "상대"
     )
-    kills = sorted(
-        (e for e in _events(timeline) if e["type"] == "CHAMPION_KILL" and e.get("victimId") == pid),
-        key=lambda e: e["timestamp"],
-    )
+    kills = _my_death_events(timeline, pid)
     result: list[dict] = []
     prev_ms: int | None = None
     for e in kills:

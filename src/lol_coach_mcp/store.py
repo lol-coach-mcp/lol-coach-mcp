@@ -268,6 +268,15 @@ class Store:
         ).fetchone()
         return (row["taken_at"], json.loads(row["data"])) if row else None
 
+    def list_rank_snapshots(self, limit: int | None = None) -> list[tuple[str, list[dict]]]:
+        """랭크 스냅샷을 시간순(오래된 것 먼저)으로 반환. limit이면 가장 최근 limit개."""
+        rows = self._conn.execute(
+            "SELECT taken_at, data FROM rank_snapshots ORDER BY taken_at DESC, id DESC"
+            + (" LIMIT ?" if limit is not None else ""),
+            (limit,) if limit is not None else (),
+        ).fetchall()
+        return [(r["taken_at"], json.loads(r["data"])) for r in reversed(rows)]
+
     # 기준선
     def get_baseline(
         self, tier: str, position: str, metric: str, champion: str | None = None

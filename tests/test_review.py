@@ -297,3 +297,16 @@ def test_key_moments_limit_keeps_earliest():
     match, tl = _tl([_death(100_000), _death(150_000), _death(190_000), _death(230_000)])
     km = review.key_moments(match, tl, "me", limit=2)
     assert [m["ms"] for m in km] == [100_000, 150_000]
+
+
+def test_death_points_match_deaths_and_have_coordinates(match, timeline):
+    pts = review.death_points(timeline, PUUID_ME)
+    deaths = review.deaths(match, timeline, PUUID_ME)
+    assert [p["ms"] for p in pts] == [d["ms"] for d in deaths]
+    assert [p["time"] for p in pts] == [d["time"] for d in deaths]
+    assert pts and all(0 <= p["x"] <= 14870 and 0 <= p["y"] <= 14870 for p in pts)
+
+
+def test_death_points_unknown_puuid_raises(timeline):
+    with pytest.raises(ValueError):
+        review.death_points(timeline, "nobody")
