@@ -154,3 +154,59 @@ async def test_new_version_refetches_and_prunes_old(store, http, clock):
     assert old.call_count == 1 and new.call_count == 1
     assert store.get_ddragon_cache("champion:16.22.1") is None
     assert store.get_ddragon_cache("champion:16.23.1") is not None
+
+
+@respx.mock
+async def test_cdn_lag_falls_back_to_previous_version_data(store, http, clock):
+    vroute = respx.get(VERSIONS).respond(json=["16.22.1"])
+    respx.get(_cdn("16.22.1", "champion")).respond(json=CHAMPION_JSON)
+    dd = DataDragon(store, http, user_agent=UA, now=clock)
+    old = await dd.champions()
+    assert dd.used_versions["champion"] == "16.22.1" and not dd.fallbacks
+    clock.now = T0 + timedelta(hours=25)
+    vroute.respond(json=["16.23.1", "16.22.1"])
+    new_route = respx.get(_cdn("16.23.1", "champion")).respond(404)
+    assert await dd.version() == "16.23.1"
+    assert await dd.champions() == old
+    assert dd.used_versions["champion"] == "16.22.1"
+    assert "champion" in dd.fallbacks
+    # 이전 버전 데이터는 새 버전 데이터 저장 전까지 지우지 않음
+    assert store.get_ddragon_cache("champion:16.22.1") is not None
+    new_route.respond(json=CHAMPION_JSON)
+    await dd.champions()
+    assert dd.used_versions["champion"] == "16.23.1" and "champion" not in dd.fallbacks
+    assert store.get_ddragon_cache("champion:16.22.1") is None
+
+
+@respx.mock
+async def test_cdn_error_without_previous_data_raises(store, http, clock):
+    respx.get(VERSIONS).respond(json=["16.22.1"])
+    respx.get(_cdn("16.22.1", "item")).respond(500)
+    with pytest.raises(httpx.HTTPError):
+        await DataDragon(store, http, user_agent=UA, now=clock).items()
+
+
+@pytest.mark.parametrize("body", [[], {"x": 1}, [123], "not json"])
+@respx.mock
+async def test_bad_versions_json(store, http, clock, body):
+    route = respx.get(VERSIONS)
+    if body == "not json":
+        route.respond(text="<html>")
+    else:
+        route.respond(json=body)
+    with pytest.raises(httpx.HTTPError):
+        await DataDragon(store, http, user_agent=UA, now=clock).version()
+
+
+@respx.mock
+async def test_bad_versions_json_uses_stale_and_refreshes_fetched_at(store, http, clock):
+    route = respx.get(VERSIONS).respond(json=["16.22.1"])
+    dd = DataDragon(store, http, user_agent=UA, now=clock)
+    await dd.version()
+    clock.now = T0 + timedelta(hours=30)
+    route.respond(json=[])
+    assert await dd.version() == "16.22.1"
+    assert route.call_count == 2
+    clock.now = T0 + timedelta(hours=31)
+    assert await dd.version() == "16.22.1"
+    assert route.call_count == 2  # 대체 사용 후 TTL 동안 재요청 안 함

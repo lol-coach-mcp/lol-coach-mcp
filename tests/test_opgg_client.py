@@ -243,3 +243,52 @@ async def test_live_opgg_champion_analysis(tmp_path):
         assert got["strong_counters"] and got["weak_counters"]
     finally:
         s.close()
+
+
+async def test_unexpected_payload_returns_none_and_warns(store, clock, caplog):
+    fake = FakeOpgg({"lol_get_champion_analysis": '{"error": "x"}'})
+    c = OpggClient(store, connect=fake, now=clock)
+    with caplog.at_level("WARNING", logger="lol_coach_mcp.opgg.client"):
+        assert await c.champion_analysis("KAISA", "adc", None) is None
+    msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("lol_get_champion_analysis" in m and "data" in m for m in msgs)
+
+
+async def test_parse_error_logged_with_message(store, clock, caplog):
+    fake = FakeOpgg({"lol_list_champions": "class R: a\n\nR(1, 2)"})
+    with caplog.at_level("WARNING", logger="lol_coach_mcp.opgg.client"):
+        assert await OpggClient(store, connect=fake, now=clock).champions() is None
+    assert any("필드 수" in r.getMessage() for r in caplog.records)
+
+
+async def test_corrupt_cache_row_is_refetched(store, clock):
+    fake = FakeOpgg(ALL)
+    c = OpggClient(store, connect=fake, now=clock)
+    await c.champions()
+    key = next(r[0] for r in store._conn.execute("SELECT key FROM opgg_cache"))
+    store.put_opgg_cache(key, "{broken", T0.isoformat())
+    champs = await c.champions()
+    assert champs and fake.connects == 2
+
+
+async def test_empty_result_not_cached(store, clock):
+    empty_meta = (
+        "class LolListLaneMetaChampions: data\nclass Data: positions\n"
+        "class Positions: adc\n\nLolListLaneMetaChampions(Data(Positions([])))"
+    )
+    fake = FakeOpgg({"lol_list_lane_meta_champions": empty_meta})
+    c = OpggClient(store, connect=fake, now=clock)
+    assert await c.lane_meta("adc") == []
+    assert await c.lane_meta("adc") == []
+    assert fake.connects == 2
+
+
+def test_champion_key_exceptions_apply_to_both_branches(monkeypatch):
+    from lol_coach_mcp.opgg import client as client_mod
+
+    monkeypatch.setattr(client_mod, "CHAMPION_KEY_EXCEPTIONS",
+                        {"KAISA": "KAI_SA", "NEWCHAMPX": "NEW_CHAMP_X"})
+    champs = parse_opgg(_sample("champions_list"))["data"]["champions"]
+    assert opgg_champion_key("Kaisa", champs) == "KAI_SA"          # 목록 매칭 경로
+    assert opgg_champion_key("New Champ'X", champs) == "NEW_CHAMP_X"  # fallback 경로
+    assert opgg_champion_key("kaisa", None) == "KAI_SA"

@@ -290,13 +290,27 @@ class Store:
                 (key, data, version, fetched_at),
             )
 
-    def prune_ddragon_cache(self, keep_version: str) -> None:
-        """버전 목록('versions')을 제외하고 keep_version이 아닌 캐시를 지움."""
+    def latest_ddragon_cache(self, prefix: str) -> tuple[str, str, str] | None:
+        """key가 prefix로 시작하는 캐시 중 가장 최근 저장된 행(data, version, fetched_at)."""
+        row = self._conn.execute(
+            "SELECT data, version, fetched_at FROM ddragon_cache "
+            "WHERE substr(key, 1, ?) = ? ORDER BY fetched_at DESC LIMIT 1",
+            (len(prefix), prefix),
+        ).fetchone()
+        return (row["data"], row["version"], row["fetched_at"]) if row else None
+
+    def prune_ddragon_cache(self, keep_version: str, prefix: str | None = None) -> None:
+        """버전 목록('versions')을 제외하고 keep_version이 아닌 캐시를 지움.
+
+        prefix가 있으면 key가 그 접두어로 시작하는 행만 대상으로 한다.
+        """
+        sql = "DELETE FROM ddragon_cache WHERE key <> 'versions' AND version <> ?"
+        params: list[Any] = [keep_version]
+        if prefix is not None:
+            sql += " AND substr(key, 1, ?) = ?"
+            params += [len(prefix), prefix]
         with self._conn:
-            self._conn.execute(
-                "DELETE FROM ddragon_cache WHERE key <> 'versions' AND version <> ?",
-                (keep_version,),
-            )
+            self._conn.execute(sql, params)
 
     def forget_all(self, include_matches: bool = False) -> None:
         tables = ["profile", "rank_snapshots"]
