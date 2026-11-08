@@ -30,6 +30,7 @@ packages = ["src/lol_coach_mcp"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 markers = ["live: 실제 Riot API 호출(RIOT_API_KEY 필요)"]
 addopts = "-m 'not live'"
