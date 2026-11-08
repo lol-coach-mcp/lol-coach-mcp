@@ -36,6 +36,15 @@ REASON_FIRST_DEATH = "첫 데스"
 REASON_DEAD_AT_OBJECTIVE = "오브젝트 때 사망 상태"
 
 
+def _side(team_id: int, other_team_id) -> str:
+    """Label a team id relative to mine: 우리 / 상대 / 중립 (e.g. 300 for herald)."""
+    if other_team_id == team_id:
+        return "우리"
+    if other_team_id == (200 if team_id == 100 else 100):
+        return "상대"
+    return "중립"
+
+
 def participant_id(timeline: dict, puuid: str) -> int:
     for p in timeline["info"]["participants"]:
         if p["puuid"] == puuid:
@@ -162,7 +171,7 @@ def deaths(match: dict, timeline: dict, puuid: str) -> list[dict]:
     enemy_epics = sorted(
         e["timestamp"]
         for e in _events(timeline)
-        if e["type"] == "ELITE_MONSTER_KILL" and e.get("killerTeamId") != team_id
+        if e["type"] == "ELITE_MONSTER_KILL" and _side(team_id, e.get("killerTeamId")) == "상대"
     )
     kills = sorted(
         (e for e in _events(timeline) if e["type"] == "CHAMPION_KILL" and e.get("victimId") == pid),
@@ -219,7 +228,7 @@ def objectives(match: dict, timeline: dict, puuid: str) -> dict:
         etype = e["type"]
         if etype == "ELITE_MONSTER_KILL":
             kind, sub = e["monsterType"], e.get("monsterSubType")
-            mine = e.get("killerTeamId") == team_id
+            side = _side(team_id, e.get("killerTeamId"))
         elif etype == "BUILDING_KILL":
             building = e.get("buildingType")
             if building == "INHIBITOR_BUILDING":
@@ -228,12 +237,13 @@ def objectives(match: dict, timeline: dict, puuid: str) -> dict:
                 kind, sub = "TOWER", e.get("towerType")
             else:
                 continue
-            mine = e.get("teamId") != team_id  # teamId = owner of destroyed building
+            side = _side(team_id, e.get("teamId"))  # owner of destroyed building
+            side = {"우리": "상대", "상대": "우리"}.get(side, side)
         else:
             continue
         ms = int(e["timestamp"])
         took_part = involved(e)
-        if etype == "ELITE_MONSTER_KILL" and mine:
+        if etype == "ELITE_MONSTER_KILL" and side == "우리":
             epic_count += 1
             if took_part:
                 participation += 1
@@ -242,7 +252,7 @@ def objectives(match: dict, timeline: dict, puuid: str) -> dict:
                 "time": mmss(ms),
                 "type": kind,
                 "sub_type": sub,
-                "team": "우리" if mine else "상대",
+                "team": side,
                 "participated": took_part,
                 "dead_at_time": any(ms - DEAD_BEFORE_OBJECTIVE_MS <= d <= ms for d in death_times),
                 "_ms": ms,
@@ -308,7 +318,7 @@ def key_moments(
         if e["type"] == "CHAMPION_KILL" and e.get("victimId") == pid
     ]
     for e in _events(timeline):
-        if e["type"] == "ELITE_MONSTER_KILL" and e.get("killerTeamId") != team_id:
+        if e["type"] == "ELITE_MONSTER_KILL" and _side(team_id, e.get("killerTeamId")) == "상대":
             ms = int(e["timestamp"])
             if any(ms - DEAD_BEFORE_OBJECTIVE_MS <= d <= ms for d in death_times):
                 add(ms, REASON_DEAD_AT_OBJECTIVE)
