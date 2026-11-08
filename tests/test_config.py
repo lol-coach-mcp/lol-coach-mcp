@@ -7,7 +7,7 @@ def test_loads_key_and_default_data_dir(tmp_path):
     s = load_settings(env={"RIOT_API_KEY": "RGAPI-test", "LOL_COACH_DATA_DIR": str(tmp_path)}, dotenv_path=tmp_path / "none.env")
     assert s.riot_api_key == "RGAPI-test"
     assert s.data_dir == tmp_path
-    assert s.user_agent == "lol-coach-mcp/0.1.0"
+    assert s.user_agent == "lol-coach-mcp/0.2.0"
 
 
 def test_missing_key_raises(tmp_path):

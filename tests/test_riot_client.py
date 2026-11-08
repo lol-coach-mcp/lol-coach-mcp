@@ -50,7 +50,7 @@ def settings() -> Settings:
     return Settings(
         riot_api_key="RGAPI-test",
         data_dir=Path("."),
-        user_agent="lol-coach-mcp/0.1.0",
+        user_agent="lol-coach-mcp/0.2.0",
     )
 
 
@@ -76,7 +76,7 @@ async def test_sends_token_and_user_agent(client):
     await client.get_match("KR_1")
     req = route.calls[0].request
     assert req.headers["X-Riot-Token"] == "RGAPI-test"
-    assert req.headers["User-Agent"] == "lol-coach-mcp/0.1.0"
+    assert req.headers["User-Agent"] == "lol-coach-mcp/0.2.0"
 
 
 @respx.mock

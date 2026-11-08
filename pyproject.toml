@@ -1,6 +1,6 @@
 [project]
 name = "lol-coach-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "개인용 리그 오브 레전드 코칭 MCP 서버"
 readme = "README.md"
 license = { text = "MIT" }
