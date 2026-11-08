@@ -166,6 +166,58 @@ def test_migrates_v1_db_in_place(tmp_path):
         s.close()
     conn = sqlite3.connect(str(path))
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == store_mod.SCHEMA_VERSION == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == store_mod.SCHEMA_VERSION == 3
     finally:
         conn.close()
+
+
+def test_migrates_v2_db_in_place_adds_caches(tmp_path):
+    import sqlite3
+
+    from lol_coach_mcp import store as store_mod
+
+    path = tmp_path / "v2.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(store_mod._SCHEMA_V1)
+    conn.executescript(store_mod._SCHEMA_V2)
+    conn.execute("PRAGMA user_version = 2")
+    conn.execute(
+        "INSERT INTO baselines (tier, position, champion, metric, mean) "
+        "VALUES ('GOLD', 'MIDDLE', '', 'kda', 2.5)"
+    )
+    conn.commit()
+    assert conn.execute(
+        "SELECT name FROM sqlite_master WHERE name = 'opgg_cache'").fetchone() is None
+    conn.close()
+
+    s = Store(path)
+    try:
+        assert s.get_baseline("GOLD", "MIDDLE", "kda")["mean"] == 2.5
+        s.put_opgg_cache("k", '{"a": 1}', "2026-11-08T00:00:00+00:00")
+        assert s.get_opgg_cache("k") == ('{"a": 1}', "2026-11-08T00:00:00+00:00")
+        s.put_ddragon_cache("champion:16.22.1", "{}", "16.22.1", "t")
+        assert s.get_ddragon_cache("champion:16.22.1") == ("{}", "16.22.1", "t")
+    finally:
+        s.close()
+    conn = sqlite3.connect(str(path))
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    finally:
+        conn.close()
+
+
+def test_caches_roundtrip_overwrite_and_prune(store):
+    assert store.get_opgg_cache("missing") is None
+    store.put_opgg_cache("k", "1", "t1")
+    store.put_opgg_cache("k", "2", "t2")
+    assert store.get_opgg_cache("k") == ("2", "t2")
+    store.put_ddragon_cache("versions", "[]", "16.23.1", "t")
+    store.put_ddragon_cache("champion:16.22.1", "{}", "16.22.1", "t")
+    store.put_ddragon_cache("champion:16.23.1", "{}", "16.23.1", "t")
+    store.prune_ddragon_cache("16.23.1")
+    assert store.get_ddragon_cache("champion:16.22.1") is None
+    assert store.get_ddragon_cache("champion:16.23.1") is not None
+    assert store.get_ddragon_cache("versions") is not None
+    # 캐시는 개인 데이터가 아니므로 forget_all 이후에도 유지
+    store.forget_all(include_matches=True)
+    assert store.get_opgg_cache("k") == ("2", "t2")

@@ -10,7 +10,7 @@ from typing import Any
 
 from lol_coach_mcp.stats import MatchStats
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 TONES = ("직설", "격려", "데이터만")
 DETAIL_LEVELS = ("초보", "보통", "숙련")
@@ -73,8 +73,23 @@ CREATE TABLE IF NOT EXISTS baselines (
 );
 """
 
+# 외부 정적·통계 데이터 캐시(개인 데이터 아님 → forget_all 대상 아님)
+_SCHEMA_V3 = """
+CREATE TABLE IF NOT EXISTS opgg_cache (
+    key TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ddragon_cache (
+    key TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    version TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
+);
+"""
+
 # (도달 버전, 스크립트) — 낮은 버전부터 차례로 적용
-_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2))
+_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3))
 
 
 @dataclass
@@ -244,6 +259,43 @@ class Store:
         with self._conn:
             self._conn.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value)
+            )
+
+    # OP.GG 캐시
+    def get_opgg_cache(self, key: str) -> tuple[str, str] | None:
+        row = self._conn.execute(
+            "SELECT data, fetched_at FROM opgg_cache WHERE key = ?", (key,)
+        ).fetchone()
+        return (row["data"], row["fetched_at"]) if row else None
+
+    def put_opgg_cache(self, key: str, data: str, fetched_at: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO opgg_cache (key, data, fetched_at) VALUES (?, ?, ?)",
+                (key, data, fetched_at),
+            )
+
+    # Data Dragon 캐시
+    def get_ddragon_cache(self, key: str) -> tuple[str, str, str] | None:
+        row = self._conn.execute(
+            "SELECT data, version, fetched_at FROM ddragon_cache WHERE key = ?", (key,)
+        ).fetchone()
+        return (row["data"], row["version"], row["fetched_at"]) if row else None
+
+    def put_ddragon_cache(self, key: str, data: str, version: str, fetched_at: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO ddragon_cache (key, data, version, fetched_at) "
+                "VALUES (?, ?, ?, ?)",
+                (key, data, version, fetched_at),
+            )
+
+    def prune_ddragon_cache(self, keep_version: str) -> None:
+        """버전 목록('versions')을 제외하고 keep_version이 아닌 캐시를 지움."""
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM ddragon_cache WHERE key <> 'versions' AND version <> ?",
+                (keep_version,),
             )
 
     def forget_all(self, include_matches: bool = False) -> None:

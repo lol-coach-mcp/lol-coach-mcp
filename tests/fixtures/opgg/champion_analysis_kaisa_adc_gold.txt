@@ -1,0 +1,9 @@
+class LolGetChampionAnalysis: data
+class Data: summary,strong_counters,weak_counters,core_items,boots,summoner_spells,runes
+class Summary: average_stats
+class AverageStats: play,win_rate,pick_rate,ban_rate,kda,tier,rank
+class StrongCounter: champion_id,champion_name,play,win_rate
+class CoreItems: ids,ids_names,play,win,pick_rate
+class Runes: primary_page_name,primary_rune_names,secondary_page_name,secondary_rune_names,play,win,pick_rate
+
+LolGetChampionAnalysis(Data(Summary(AverageStats(132812,0.49,0.22,0.04,2.38,1,16)),[StrongCounter(81,"이즈리얼",5755,0.54),StrongCounter(800,"멜",196,0.54),StrongCounter(236,"루시안",2474,0.52)],[StrongCounter(50,"스웨인",220,0.69),StrongCounter(96,"코그모",809,0.57),StrongCounter(221,"제리",1036,0.54)],CoreItems([6672,3124,3302],["크라켄 학살자","구인수의 격노검","경계"],32766,17201,0.37),CoreItems([3006],["광전사의 군화"],94763,47233,0.89),CoreItems([4,21],[4,21],95402,47098,0.83),Runes("정밀",["치명적 속도","침착","전설: 핏빛 길","최후의 일격"],"영감",["마법의 신발","비스킷 배달"],63112,31204,0.53)))
