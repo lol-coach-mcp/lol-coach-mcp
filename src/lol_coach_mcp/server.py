@@ -12,12 +12,13 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp_types import CallToolResult
 
 from lol_coach_mcp.config import Settings, load_settings
-from lol_coach_mcp import analysis, form, review
+from lol_coach_mcp import analysis, form, periods, review, splits
 from lol_coach_mcp.models import (
     CoachContextOut,
     DeathOut,
     DetailPlayerOut,
     DetailTeamOut,
+    DuoPartnerOut,
     FormOut,
     LaneOut,
     MasteryOut,
@@ -31,6 +32,8 @@ from lol_coach_mcp.models import (
     RankOut,
     ReviewOut,
     ReviewSummaryOut,
+    SplitGroupOut,
+    SplitsOut,
     SyncOut,
     VisionOut,
 )
@@ -72,6 +75,7 @@ NO_REVIEW_MATCH_MESSAGE = (
 
 FORM_DEFAULT_COUNT = 20
 FORM_MAX_COUNT = 100
+SPLITS_DEFAULT_COUNT = 30
 NOTE_NO_RANK_INFO = "현재 티어를 확인하지 못함"
 SOLO_QUEUE_TYPE = "RANKED_SOLO_5x5"
 
@@ -307,6 +311,44 @@ def _form_text(out: FormOut) -> str:
         for k, v in recs:
             mark = " [최신 경기가 갱신]" if k in out.records.get("updated_by_latest", []) else ""
             lines.append(f"{v['label']} {v['value']} ({v['champion']}){mark}")
+    return "\n".join(lines)
+
+
+async def _sync_for_analysis(
+    st: AppState, p: Profile, queue: int | None, count: int
+) -> list[str] | CallToolResult:
+    """분석 전 동기화. 실패해도 저장된 경기가 있으면 안내 문구만 반환하고, 없으면 오류 결과를 반환함."""
+    try:
+        await run_sync(st.riot, st.store, p.puuid, queue=queue, limit=count, full=False)
+    except (RiotError, httpx.HTTPError) as e:
+        if not st.store.list_my_stats(queue=queue, limit=1, include_remakes=True):
+            if isinstance(e, RiotError):
+                return tool_error(str(e))
+            return tool_error(NETWORK_ERROR_MESSAGE)
+        return [SYNC_FAILED_NOTE]
+    return []
+
+
+def _splits_text(out: SplitsOut) -> str:
+    lines = [
+        f"{out.period_desc}, {queue_label(out.queue)}, {out.games}판, 분할 기준 {out.split_by}.",
+        *[n + "." for n in out.notes],
+    ]
+    for g in out.groups:
+        rate = "없음" if g.win_rate is None else f"{g.win_rate * 100:.1f}%"
+        mets = ", ".join(
+            f"{analysis.METRICS[k][0]} {_fmt(k, v)}" for k, v in g.metrics.items()
+        )
+        lines.append(f"{g.label}: {g.games}판, 승률 {rate}, {mets} [{g.status}]")
+    if out.rows:
+        lines.append(f"{splits.WIN_LOSS_SOURCE} 비교(내 값은 승리 판, 기준은 패배 판):")
+        lines += [_row_text(r) for r in out.rows]
+    if out.duo_partners:
+        lines.append(
+            "듀오 파트너 후보: "
+            + ", ".join(f"{d.riot_id}({d.games_together}판)" for d in out.duo_partners)
+            + "."
+        )
     return "\n".join(lines)
 
 
@@ -775,15 +817,9 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         if p is None:
             return tool_error(NO_PROFILE_MESSAGE)
         count = max(1, min(count, FORM_MAX_COUNT))
-        sync_notes: list[str] = []
-        try:
-            await run_sync(st.riot, st.store, p.puuid, queue=queue, limit=count, full=False)
-        except (RiotError, httpx.HTTPError) as e:
-            if not st.store.list_my_stats(queue=queue, limit=1, include_remakes=True):
-                if isinstance(e, RiotError):
-                    return tool_error(str(e))
-                return tool_error(NETWORK_ERROR_MESSAGE)
-            sync_notes.append(SYNC_FAILED_NOTE)
+        sync_notes = await _sync_for_analysis(st, p, queue, count)
+        if isinstance(sync_notes, CallToolResult):
+            return sync_notes
         stats = st.store.list_my_stats(queue=queue, include_remakes=True)
         tier = tier_note = None
         if compare_to == "tier_baseline":
@@ -808,5 +844,39 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             **built,
         )
         return tool_result(out, _form_text(out))
+
+    @mcp.tool()
+    async def compare_splits(
+        ctx: Context,
+        split_by: Literal[
+            "win_loss", "time_of_day", "weekday", "game_length", "position", "patch", "duo"
+        ],
+        period: Literal["recent_n", "session", "week", "month", "season"] = "recent_n",
+        count: int = SPLITS_DEFAULT_COUNT,
+        queue: int | None = 420,
+    ) -> Annotated[CallToolResult, SplitsOut]:
+        """같은 기간의 경기를 기준별로 나눠 그룹별 판수·승률·지표 평균을 비교함. split_by: win_loss(승리 판 vs 패배 판, 근거 행 포함)/time_of_day(KST 시간대)/weekday(요일)/game_length(게임 시간)/position/patch/duo(기간 내 3판 이상 함께한 팀원을 듀오로 추정, 듀오 판 vs 혼자 한 판의 내 지표만). 그룹 판수 5 미만은 판단 보류. 상관관계이며 원인이 아님. 매번 새 경기를 동기화하고, 실패하면 저장된 데이터 기준으로 응답함."""
+        st = _state(ctx)
+        p = st.store.get_profile()
+        if p is None:
+            return tool_error(NO_PROFILE_MESSAGE)
+        count = max(1, min(count, FORM_MAX_COUNT))
+        sync_notes = await _sync_for_analysis(st, p, queue, count)
+        if isinstance(sync_notes, CallToolResult):
+            return sync_notes
+        stats = st.store.list_my_stats(queue=queue, include_remakes=True)
+        picked, period_desc = periods.select(stats, period, count)
+        built = splits.build_splits(picked, split_by, st.store.get_match)
+        out = SplitsOut(
+            split_by=split_by,
+            period_desc=period_desc,
+            games=len(picked),
+            queue=queue,
+            groups=[SplitGroupOut(**g) for g in built["groups"]],
+            rows=built["rows"],
+            duo_partners=[DuoPartnerOut(**d) for d in built["duo_partners"]],
+            notes=sync_notes + built["notes"],
+        )
+        return tool_result(out, _splits_text(out))
 
     return mcp

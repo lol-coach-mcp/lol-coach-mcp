@@ -223,3 +223,27 @@ class FormOut(BaseModel):
     style: list[str]
     records: dict
     notes: list[str] = []
+
+
+class SplitGroupOut(BaseModel):
+    label: str
+    games: int
+    win_rate: float | None = None
+    metrics: dict[str, float | None]
+    status: str
+
+
+class DuoPartnerOut(BaseModel):
+    riot_id: str
+    games_together: int
+
+
+class SplitsOut(BaseModel):
+    split_by: str
+    period_desc: str
+    games: int
+    queue: int | None = None
+    groups: list[SplitGroupOut]
+    rows: list[dict] = []
+    duo_partners: list[DuoPartnerOut] = []
+    notes: list[str] = []
