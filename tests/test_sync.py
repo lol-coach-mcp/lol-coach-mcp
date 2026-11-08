@@ -52,6 +52,7 @@ async def test_first_sync_stores_up_to_limit(store):
     assert r.stopped_reason == "limit_reached"
     assert len(c.match_calls) == 100
     assert r.total_stored == 100
+    assert c.id_calls == [0]
 
 
 async def test_incremental_stops_at_known(store):
@@ -110,3 +111,45 @@ async def test_not_found_match_skipped(store):
     r = await sync_matches(C(make_ids(3)), store, PUUID_ME)
     assert r.new_matches == 2
     assert not store.has_match("KR_2")
+
+
+async def test_midsync_failure_leaves_no_gap(store):
+    from lol_coach_mcp.riot.errors import RiotServerError
+
+    ids = make_ids(10)
+
+    class Flaky(FakeClient):
+        async def get_match(self, match_id):
+            if len(self.match_calls) == 4:
+                raise RiotServerError("boom")
+            return await super().get_match(match_id)
+
+    with pytest.raises(RiotServerError):
+        await sync_matches(Flaky(ids), store, PUUID_ME)
+    r = await sync_matches(FakeClient(ids), store, PUUID_ME)
+    assert all(store.has_match(m) for m in ids)
+    assert r.total_stored == 10
+
+
+async def test_timeline_error_does_not_store_match(store):
+    from lol_coach_mcp.riot.errors import RiotServerError
+
+    class C(FakeClient):
+        async def get_timeline(self, match_id):
+            raise RiotServerError("boom")
+
+    with pytest.raises(RiotServerError):
+        await sync_matches(C(make_ids(2)), store, PUUID_ME)
+    assert not store.has_match("KR_1")
+    assert not store.has_match("KR_2")
+
+
+async def test_full_skips_known_and_fetches_rest(store):
+    ids = make_ids(250)
+    await sync_matches(FakeClient(ids), store, PUUID_ME, limit=100)
+    c = FakeClient(ids)
+    r = await sync_matches(c, store, PUUID_ME, full=True)
+    assert r.new_matches == 150
+    assert r.stopped_reason == "no_more"
+    assert len(c.match_calls) == 150
+    assert r.total_stored == 250

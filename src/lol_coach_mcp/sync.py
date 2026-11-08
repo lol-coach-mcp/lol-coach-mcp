@@ -52,34 +52,39 @@ async def sync_matches(
         page = await client.get_match_ids(puuid, queue=queue, start=start, count=PAGE_SIZE)
         for mid in page:
             if store.has_match(mid):
+                if full:
+                    continue  # 전체 동기화: 저장된 ID는 건너뛰고 계속
                 reason = "caught_up"
                 done_paging = True
                 break
+            new_ids.append(mid)
             if not full and len(new_ids) >= limit:
                 reason = "limit_reached"
                 done_paging = True
                 break
-            new_ids.append(mid)
         else:
             if len(page) < PAGE_SIZE:
                 done_paging = True
             else:
                 start += PAGE_SIZE
 
-    # 2) 경기별 저장
+    # 2) 오래된 것부터 저장: 도중에 실패해도 다음 동기화가 빈 구간을 이어받음
     total = len(new_ids)
     saved = 0
-    for i, mid in enumerate(new_ids, start=1):
+    for i, mid in enumerate(reversed(new_ids), start=1):
         try:
             match = await client.get_match(mid)
             stats = extract_match_stats(match, puuid)
-            store.save_match(mid, match, stats)
-            saved += 1
+            timeline = None
             if with_timeline:
                 try:
-                    store.save_timeline(mid, await client.get_timeline(mid))
+                    timeline = await client.get_timeline(mid)
                 except RiotNotFound:
-                    pass
+                    pass  # 타임라인 없이 경기만 저장
+            store.save_match(mid, match, stats)
+            if timeline is not None:
+                store.save_timeline(mid, timeline)
+            saved += 1
         except RiotNotFound:
             pass  # Riot이 정리한 경기는 건너뜀
         if progress is not None:
