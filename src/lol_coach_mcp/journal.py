@@ -18,7 +18,7 @@ KEYWORD_TABLE: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 )
 # 키워드를 포함하지만 다른 뜻인 단어는 매칭 전에 제거
 FALSE_POSITIVE_WORDS = ("딜레이", "딜러", "갱신")
-# 영문 키워드는 독립 토큰으로만 매칭 (ics, abcs 등 제외)
+# 영문 키워드는 독립 토큰으로만 매칭 (ics, abcs, csv 제외; cs10 같은 숫자 접미는 허용)
 STANDALONE_KEYWORDS = ("cs",)
 TOPIC_LABELS = {t: label for t, label, _ in KEYWORD_TABLE}
 TOPIC_LABELS["default"] = "기본 지표"
@@ -40,7 +40,7 @@ def match_topics(text: str) -> list[str]:
 
 def _has_keyword(low: str, kw: str) -> bool:
     if kw in STANDALONE_KEYWORDS:
-        return re.search(rf"(?<![a-z0-9]){re.escape(kw)}(?![a-z0-9])", low) is not None
+        return re.search(rf"(?<![a-z0-9]){re.escape(kw)}(?![a-z])", low) is not None
     return kw in low
 
 

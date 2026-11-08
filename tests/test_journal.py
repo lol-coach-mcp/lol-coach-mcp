@@ -17,10 +17,11 @@ def test_keyword_matching_case_insensitive_multiple():
 
 
 def test_keyword_false_positives_excluded_and_cs_standalone():
-    for t in ("딜레이가 심함", "딜러 포지션", "갱신된 패치", "ics 하나", "abcs"):
+    for t in ("딜레이가 심함", "딜러 포지션", "갱신된 패치", "ics 하나", "abcs", "csv 파일"):
         assert journal.match_topics(t) == [], t
     assert journal.match_topics("CS 부족") == ["farming"]
     assert journal.match_topics("cs, 놓침") == ["farming"]
+    assert journal.match_topics("cs10 부족, cs20개") == ["farming"]
     assert journal.match_topics("딜이 낮음") == ["damage"]
     assert journal.match_topics("갱 당함") == ["jungle"]
 

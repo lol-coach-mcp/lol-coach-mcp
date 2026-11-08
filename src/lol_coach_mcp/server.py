@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -11,6 +12,7 @@ from typing import Annotated, Any, Literal
 
 import httpx
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ResourceError
 from mcp_types import CallToolResult
 
 from lol_coach_mcp.config import Settings, load_settings
@@ -928,6 +930,8 @@ def _habits_text(out: HabitsOut) -> str:
     return "\n".join(lines)
 
 
+NOT_READY_MESSAGE = "서버가 아직 준비되지 않음. 서버 시작이 끝난 뒤 다시 읽어야 함."
+MATCH_ID_PATTERN = re.compile(r"^[A-Z0-9]+_\d+$")
 PROMPT_COMMON = (
     "먼저 get_coach_context를 호출해 프로필의 말투(tone)와 상세 수준(detail_level) 설정을 확인하고, "
     "그 말투와 상세 수준을 지켜 답변해야 함. 아래 순서대로 도구를 호출하고, "
@@ -938,16 +942,17 @@ PROMPT_COMMON = (
 def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPServer:
     factory = state_factory or _default_state
     # 정적 리소스 핸들러는 Context를 받을 수 없으므로 lifespan 상태를 여기에 보관
-    live: dict[str, AppState] = {}
+    live: list[AppState] = []
 
     @asynccontextmanager
     async def lifespan(server: MCPServer) -> AsyncIterator[AppState]:
         state = factory()
-        live["state"] = state
+        live.append(state)
         try:
             yield state
         finally:
-            live.pop("state", None)
+            # 겹친 lifespan이 서로의 상태를 지우지 않도록 자기 것만(동일성 기준) 제거
+            live[:] = [x for x in live if x is not state]
             aclose = getattr(state.riot, "aclose", None)
             if aclose is not None:
                 await aclose()
@@ -1036,6 +1041,11 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         except httpx.HTTPError:
             return tool_error(NETWORK_ERROR_MESSAGE)
 
+    def live_state() -> AppState:
+        if not live:
+            raise ResourceError(NOT_READY_MESSAGE)
+        return live[-1]
+
     def build_context(st: AppState) -> tuple[Profile, CoachContextOut] | None:
         p = st.store.get_profile()
         if p is None:
@@ -1070,7 +1080,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         description="get_coach_context와 같은 내용(프로필 설정, 진행 중 과제, 최근 판정 기록, 일지)",
     )
     async def context_resource() -> str:
-        built = build_context(live["state"])
+        built = build_context(live_state())
         if built is None:
             data = {"registered": False, "guidance": NO_PROFILE_MESSAGE}
         else:
@@ -1082,16 +1092,26 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         description="저장된 티어 기준선의 출처, 패치, 수집일, 표본 요약",
     )
     async def baselines_resource() -> str:
-        summary = live["state"].store.baseline_summary()
+        summary = live_state().store.baseline_summary()
         return json.dumps(summary or {"status": "기준선 없음"}, ensure_ascii=False)
 
     @mcp.prompt(name="match_review", description="방금 판 경기 복기")
     def match_review(match_id: str = "") -> str:
-        target = f"match_id {match_id}" if match_id else "가장 최근 경기(match_id 생략)"
+        mid = match_id.strip()
+        note = ""
+        if mid and not MATCH_ID_PATTERN.match(mid):
+            note = f" 입력된 match_id({mid[:40]!r})는 형식이 맞지 않아 무시함."
+            mid = ""
+        if mid:
+            target = f"match_id {mid}"
+            args = f'match_id="{mid}", '
+        else:
+            target = "가장 최근 경기(match_id 생략)"
+            args = ""
         return (
-            f"{PROMPT_COMMON} 대상은 {target}임. "
-            f"1) review_match(focus=overview)로 경기 개요를 확인하고, "
-            f"2) review_match(focus=key_moments)로 핵심 장면을 확인하고, "
+            f"{PROMPT_COMMON} 대상은 {target}임.{note} "
+            f"1) review_match({args}focus=overview)로 경기 개요를 확인하고, "
+            f"2) review_match({args}focus=key_moments)로 핵심 장면을 확인하고, "
             f"3) goals(action=check)로 진행 중 과제의 달성 여부를 확인함. "
             f"요약할 내용: 결과와 개요 수치, 핵심 장면별 근거, 과제 진행 상황."
         )

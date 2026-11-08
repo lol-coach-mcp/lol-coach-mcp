@@ -1,6 +1,13 @@
 import json
+from pathlib import Path
+
+import pytest
 
 from mcp import Client
+from mcp.server.mcpserver.exceptions import ResourceError
+
+from lol_coach_mcp.server import AppState, create_server
+from lol_coach_mcp.config import Settings
 
 from test_server_form import EmptyRiot, _mixed, _setup
 from test_server_profile import make_server, store  # noqa: F401
@@ -62,6 +69,45 @@ async def test_baselines_resource_summary(store):
     assert data["collected_at"] == {"min": "2026-10-20", "max": "2026-11-01"}
 
 
+FRAGMENTS = {
+    "match_review": ["review_match(focus=overview)", "review_match(focus=key_moments)",
+                     "goals(action=check)"],
+    "weekly_review": ["analyze_form(period=week)", "compare_splits(split_by=win_loss, period=week)"],
+    "season_review": ["analyze_form(period=season)", "champion_report(mode=overview)",
+                      "find_habits(period=season)"],
+    "session_wrap": ["analyze_form(period=session)", "review_match"],
+}
+
+
+async def test_match_review_with_id_and_invalid_id(store):
+    async with Client(make_server(store, EmptyRiot())) as c:
+        t = (await c.get_prompt("match_review", {"match_id": "KR_0000000001"})).messages[0].content.text
+        assert 'review_match(match_id="KR_0000000001", focus=overview)' in t
+        assert 'review_match(match_id="KR_0000000001", focus=key_moments)' in t
+        bad = (await c.get_prompt("match_review", {"match_id": 'x"); drop'})).messages[0].content.text
+        assert "무시함" in bad and "match_id=" not in bad.replace("match_id 생략", "")
+
+
+async def test_resource_outside_lifespan_gives_korean_error(store):
+    server = make_server(store, EmptyRiot())
+    with pytest.raises(ResourceError, match="서버가 아직 준비되지 않음"):
+        await server.read_resource("coach://baselines")
+
+
+async def test_overlapping_lifespans_do_not_clobber(store):
+    server = create_server(lambda: AppState(
+        settings=Settings(riot_api_key="k", data_dir=Path("."), user_agent="t"),
+        riot=EmptyRiot(), store=store))
+    async with Client(server):
+        async with Client(server) as inner:
+            assert await _read(inner, "coach://baselines") == {"status": "기준선 없음"}
+        # 안쪽 lifespan이 끝나도 바깥 lifespan 상태가 유지되어야 함
+        r = await server.read_resource("coach://baselines")
+        assert "기준선 없음" in list(r)[0].content
+    with pytest.raises(ResourceError):
+        await server.read_resource("coach://baselines")
+
+
 async def test_prompts_name_tools_in_order(store):
     async with Client(make_server(store, EmptyRiot())) as c:
         async def text(name, args=None):
@@ -78,6 +124,8 @@ async def test_prompts_name_tools_in_order(store):
         for name, order in specs.items():
             t = await text(name)
             assert "get_coach_context" in t and "말투" in t and "상세" in t
+            for frag in FRAGMENTS[name]:
+                assert frag in t, (name, frag)
             pos = [t.index(k) for k in order]
             assert pos == sorted(pos), name
         assert "KR_0000000001" in await text("match_review", {"match_id": "KR_0000000001"})
