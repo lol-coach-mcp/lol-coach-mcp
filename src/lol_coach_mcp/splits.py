@@ -33,6 +33,7 @@ LENGTH_LABELS = ("25분 미만", "25~35분", "35분 초과")
 WIN_LABEL = "승리 판"
 LOSS_LABEL = "패배 판"
 WIN_LOSS_SOURCE = "승리 판 vs 패배 판"
+DUO_LABEL = "듀오"
 SOLO_LABEL = "혼자"
 NOTE_CORRELATION = "상관관계이며 원인은 아님"
 NOTE_NO_WINS = "승리 판이 없어 승리 판과 패배 판을 비교할 수 없음"
@@ -54,8 +55,8 @@ def group_summary(label: str, games: list[MatchStats]) -> dict:
     for m, values in series.items():
         if m == "win":
             continue
-        metrics[m] = analysis._round(m, statistics.fmean(values)) if values else None
-    win_rate = analysis._round("win", statistics.fmean(series["win"])) if n else None
+        metrics[m] = analysis.round_metric(m, statistics.fmean(values)) if values else None
+    win_rate = analysis.round_metric("win", statistics.fmean(series["win"])) if n else None
     return {
         "label": label,
         "games": n,
@@ -107,7 +108,8 @@ def win_loss_rows(stats: list[MatchStats]) -> tuple[list[analysis.EvidenceRow], 
     notes = [NOTE_CORRELATION]
     if not wins or not losses:
         for row in rows:
-            row["status"] = analysis.STATUS_NOT_COMPARABLE
+            if row["status"] != analysis.STATUS_REFERENCE:  # 서포터 CS·골드는 참고용 유지
+                row["status"] = analysis.STATUS_NOT_COMPARABLE
             row["clear_gap"] = row["strong_gap"] = False
         notes.append(NOTE_NO_WINS if not wins else NOTE_NO_LOSSES)
     return rows, notes
@@ -130,21 +132,16 @@ def duo_groups(
         (p for p, n in counts.items() if n >= DUO_MIN_GAMES), key=lambda p: (-counts[p], p)
     )
     matches = {s.match_id: m for s in stats if (m := get_match(s.match_id))}
-    labels: dict[str, str] = {}
-    for p in partners:
-        rid = _riot_id(p, matches)
-        labels[p] = rid if rid != UNKNOWN_ID else f"{UNKNOWN_ID}:{p[:8]}"
-    partner_info = [{"riot_id": labels[p], "games_together": counts[p]} for p in partners]
-
-    by: dict[str, list[MatchStats]] = {p: [] for p in partners}
-    solo: list[MatchStats] = []
-    for s in stats:
-        # 한 판에 파트너가 여럿이면 함께한 판이 가장 많은 파트너에게만 배정(중복 집계 방지)
-        mine = next((p for p in partners if p in s.teammates), None)
-        (by[mine] if mine else solo).append(s)
-    groups = [group_summary(f"듀오({labels[p]})", by[p]) for p in partners if by[p]]
-    groups.append(group_summary(SOLO_LABEL, solo))  # 0판이어도 표시(판단 보류)
+    partner_info = [
+        {"riot_id": _riot_id(p, matches), "games_together": counts[p]} for p in partners
+    ]
+    partner_set = set(partners)
+    duo = [s for s in stats if partner_set.intersection(s.teammates)]
+    solo = [s for s in stats if not partner_set.intersection(s.teammates)]
+    groups = [group_summary(DUO_LABEL, duo), group_summary(SOLO_LABEL, solo)]
     notes = [NOTE_SOLO_MEANING] if partners else [NOTE_NO_PARTNER]
+    if len(partners) >= 2:
+        notes.append(f"듀오 파트너 {len(partners)}명 포함")
     return groups, partner_info, notes
 
 

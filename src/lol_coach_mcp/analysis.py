@@ -105,7 +105,7 @@ def summary(values: list[float]) -> dict:
     return {"mean": statistics.fmean(values), "std": std, "n": n}
 
 
-def _round(metric: str, v: float | None) -> float | None:
+def round_metric(metric: str, v: float | None) -> float | None:
     if v is None:
         return None
     return round(v, 3 if metric in RATE_METRICS else 2)
@@ -174,13 +174,13 @@ def compare_metric(
         "metric": metric,
         "label": label,
         "higher_is_better": higher,
-        "my_value": _round(metric, me["mean"]),
+        "my_value": round_metric(metric, me["mean"]),
         "my_sample": me["n"],
-        "ref_value": _round(metric, ref_mean),
+        "ref_value": round_metric(metric, ref_mean),
         "ref_sample": ref_n,
         "ref_source": ref_source,
-        "difference": _round(metric, diff),
-        "margin": _round(metric, margin),
+        "difference": round_metric(metric, diff),
+        "margin": round_metric(metric, margin),
         "clear_gap": clear,
         "strong_gap": strong,
         "status": status,

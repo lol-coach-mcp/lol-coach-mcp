@@ -74,7 +74,7 @@ NO_REVIEW_MATCH_MESSAGE = (
 )
 
 FORM_DEFAULT_COUNT = 20
-FORM_MAX_COUNT = 100
+ANALYSIS_MAX_COUNT = 100
 SPLITS_DEFAULT_COUNT = 30
 NOTE_NO_RANK_INFO = "현재 티어를 확인하지 못함"
 SOLO_QUEUE_TYPE = "RANKED_SOLO_5x5"
@@ -816,7 +816,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         p = st.store.get_profile()
         if p is None:
             return tool_error(NO_PROFILE_MESSAGE)
-        count = max(1, min(count, FORM_MAX_COUNT))
+        count = max(1, min(count, ANALYSIS_MAX_COUNT))
         sync_notes = await _sync_for_analysis(st, p, queue, count)
         if isinstance(sync_notes, CallToolResult):
             return sync_notes
@@ -860,7 +860,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
         p = st.store.get_profile()
         if p is None:
             return tool_error(NO_PROFILE_MESSAGE)
-        count = max(1, min(count, FORM_MAX_COUNT))
+        count = max(1, min(count, ANALYSIS_MAX_COUNT))
         sync_notes = await _sync_for_analysis(st, p, queue, count)
         if isinstance(sync_notes, CallToolResult):
             return sync_notes

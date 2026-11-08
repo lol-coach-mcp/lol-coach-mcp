@@ -157,9 +157,9 @@ async def test_duo_detection_three_games(store):
     sc = r.structured_content
     assert sc["duo_partners"] == [{"riot_id": "듀오친구#KR1", "games_together": 3}]
     g = _groups(r)
-    assert g["듀오(듀오친구#KR1)"]["games"] == 3 and g["듀오(듀오친구#KR1)"]["status"] == "판단 보류"
+    assert g["듀오"]["games"] == 3 and g["듀오"]["status"] == "판단 보류"
     assert g["혼자"]["games"] == 9 and g["혼자"]["status"] == "ok"
-    assert g["듀오(듀오친구#KR1)"]["win_rate"] == 1.0
+    assert g["듀오"]["win_rate"] == 1.0
     text = r.content[0].text
     assert "듀오친구#KR1" in text and "puuid" not in text.lower()
     # 파트너 본인 지표는 없음, 저장도 하지 않음
@@ -175,7 +175,8 @@ async def test_duo_two_games_is_not_partner(store):
     r = await _run(store, stats, {"split_by": "duo"})
     sc = r.structured_content
     assert sc["duo_partners"] == []
-    assert [g["label"] for g in sc["groups"]] == ["혼자"]
+    g = _groups(r)
+    assert list(g) == ["듀오", "혼자"] and g["듀오"]["games"] == 0 and g["혼자"]["games"] == 10
     assert any("듀오 후보가 없음" in n for n in sc["notes"])
 
 
@@ -184,8 +185,8 @@ async def test_duo_all_games_duo_shows_empty_solo_group_on_hold(store):
     matches = {s.match_id: _match(s, {"p": "짝꿍"}) for s in stats}
     r = await _run(store, stats, {"split_by": "duo"}, matches=matches)
     g = _groups(r)
-    assert list(g) == ["듀오(짝꿍#KR1)", "혼자"]
-    assert g["듀오(짝꿍#KR1)"]["games"] == 8
+    assert list(g) == ["듀오", "혼자"]
+    assert g["듀오"]["games"] == 8
     assert g["혼자"]["games"] == 0 and g["혼자"]["status"] == "판단 보류"
     assert g["혼자"]["win_rate"] is None
     assert "혼자: 0판" in r.content[0].text
@@ -194,15 +195,26 @@ async def test_duo_all_games_duo_shows_empty_solo_group_on_hold(store):
 async def test_duo_unknown_riot_id_is_labeled(store):
     stats = [replace(_ms(i), teammates=("pppppppp-1", f"a{i}", f"b{i}", f"c{i}")) for i in range(5)]
     r = await _run(store, stats, {"split_by": "duo"})
-    assert r.structured_content["duo_partners"][0]["riot_id"].startswith("Riot ID 확인 불가")
+    assert r.structured_content["duo_partners"][0]["riot_id"] == "Riot ID 확인 불가"
 
 
-def test_duo_multiple_partners_no_double_count():
+def test_duo_multiple_partners_two_groups_only():
     stats = [replace(_ms(i), teammates=("p", "q", f"a{i}", f"b{i}")) for i in range(4)]
     stats += [replace(_ms(10 + i), teammates=("q", f"c{i}", f"d{i}", f"e{i}")) for i in range(2)]
-    groups, partners, _ = splits.duo_groups(stats, lambda mid: None)
-    assert sum(g["games"] for g in groups) == len(stats)
-    assert partners[0]["games_together"] == 6  # q
+    stats += [replace(_ms(20 + i), teammates=(f"f{i}", f"g{i}", f"h{i}", f"i{i}")) for i in range(3)]
+    stats += [replace(_ms(30), teammates=("p", "x", "y", "z"))]
+    groups, partners, notes = splits.duo_groups(stats, lambda mid: None)
+    assert [g["label"] for g in groups] == ["듀오", "혼자"]
+    assert groups[0]["games"] == 7 and groups[1]["games"] == 3
+    assert [d["games_together"] for d in partners] == [6, 5]
+    assert "듀오 파트너 2명 포함" in notes
+
+
+def test_win_loss_override_keeps_support_reference_status():
+    stats = [replace(_ms(i, win=True), position="UTILITY") for i in range(12)]
+    rows, _ = splits.win_loss_rows(stats)
+    by = {r["metric"]: r["status"] for r in rows}
+    assert by["cs_per_min"] == "참고용" and by["deaths"] == "비교 불가"
 
 
 async def test_period_and_count_applied(store):
