@@ -1,0 +1,38 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.lol-coach-mcp/lol-coach-mcp",
+  "title": "LoL Coach",
+  "description": "Personal League of Legends coaching from your own Riot API match data (KR server, Korean).",
+  "version": "1.0.0",
+  "repository": {
+    "url": "https://github.com/lol-coach-mcp/lol-coach-mcp",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/lol-coach-mcp/lol-coach-mcp",
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/lol-coach-mcp/lol-coach-mcp/releases/download/v1.0.0/lol-coach-mcp-1.0.0.mcpb",
+      "fileSha256": "e4127b58e6ac08bc2ee1c26b3970beae59ae6a076351410b9786473d4cc4aa14",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "RIOT_API_KEY",
+          "description": "Your own Riot API key from https://developer.riotgames.com (RGAPI-...)",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "LOL_COACH_DATA_DIR",
+          "description": "Optional folder for local match data (SQLite) and reports",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "filepath"
+        }
+      ]
+    }
+  ]
+}

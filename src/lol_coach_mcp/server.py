@@ -23,6 +23,7 @@ from mcp_types import CallToolResult
 from lol_coach_mcp.baseline import loader as baseline_loader
 from lol_coach_mcp.config import Settings, load_settings
 from lol_coach_mcp import (
+    __version__,
     analysis, builds, champions, explain as explain_mod, form, goals as goals_mod, habits,
     journal as journal_mod, matchups, memory, periods, review, splits,
 )
@@ -1240,7 +1241,7 @@ def create_server(state_factory: Callable[[], AppState] | None = None) -> MCPSer
             if state_factory is None:
                 state.store.close()
 
-    mcp = MCPServer("lol-coach-mcp", instructions=INSTRUCTIONS, lifespan=lifespan)
+    mcp = MCPServer("lol-coach-mcp", version=__version__, instructions=INSTRUCTIONS, lifespan=lifespan)
 
     @mcp.tool()
     async def my_profile(

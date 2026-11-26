@@ -1,0 +1,74 @@
+{
+  "manifest_version": "0.4",
+  "name": "lol-coach-mcp",
+  "display_name": "LoL Coach (리그 오브 레전드 코칭)",
+  "version": "1.0.0",
+  "description": "내 롤 전적을 Riot 공식 API로 분석해 코칭해 주는 MCP 서버 / Personal League of Legends coaching MCP server (KR server, Korean).",
+  "long_description": "Riot 공식 API로 내 경기를 가져와 복기, 최근 폼, 반복 습관, 챔피언·매치업·빌드 리포트, 연습 과제와 코칭 일지, 로컬 대시보드를 제공합니다. 경기 데이터와 설정은 내 PC의 SQLite에만 저장됩니다. 각 사용자가 자신의 Riot API 키를 직접 입력해야 합니다.\n\nlol-coach-mcp isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games, and all associated properties are trademarks or registered trademarks of Riot Games, Inc.",
+  "author": {
+    "name": "lol-coach-mcp team",
+    "url": "https://github.com/lol-coach-mcp"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lol-coach-mcp/lol-coach-mcp.git"
+  },
+  "homepage": "https://github.com/lol-coach-mcp/lol-coach-mcp",
+  "documentation": "https://github.com/lol-coach-mcp/lol-coach-mcp#readme",
+  "support": "https://github.com/lol-coach-mcp/lol-coach-mcp/issues",
+  "license": "MIT",
+  "keywords": ["league-of-legends", "lol", "riot-games", "coaching", "esports", "korean"],
+  "server": {
+    "type": "uv",
+    "entry_point": "src/lol_coach_mcp/__main__.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "--no-dev", "--frozen", "lol-coach-mcp"],
+      "env": {
+        "RIOT_API_KEY": "${user_config.riot_api_key}",
+        "LOL_COACH_DATA_DIR": "${user_config.data_dir}"
+      }
+    }
+  },
+  "user_config": {
+    "riot_api_key": {
+      "type": "string",
+      "title": "Riot API Key",
+      "description": "본인의 Riot API 키 (https://developer.riotgames.com 에서 발급, RGAPI-로 시작). Your own Riot API key.",
+      "sensitive": true,
+      "required": true
+    },
+    "data_dir": {
+      "type": "directory",
+      "title": "Data directory (선택)",
+      "description": "경기 데이터(SQLite)와 리포트를 저장할 폴더. 비워 두면 기본 위치(~/.local/share/lol-coach-mcp, Windows는 %APPDATA%\\lol-coach-mcp)를 씁니다.",
+      "required": false,
+      "default": ""
+    }
+  },
+  "tools": [
+    { "name": "my_profile", "description": "내 계정 등록과 코칭 설정 기억" },
+    { "name": "get_coach_context", "description": "코칭 시작용 설정·동기화 상태·진행 중 과제 요약" },
+    { "name": "sync_matches", "description": "경기 동기화 (내 PC의 SQLite에 저장)" },
+    { "name": "get_profile", "description": "랭크·숙련도·최근 폼 조회" },
+    { "name": "get_match_history", "description": "최근 전적 조회" },
+    { "name": "get_match_detail", "description": "한 판 상세 조회" },
+    { "name": "review_match", "description": "한 판 복기 (타임라인 근거 포함)" },
+    { "name": "analyze_form", "description": "최근 폼 분석" },
+    { "name": "compare_splits", "description": "기간·챔피언·포지션 등 구간 비교" },
+    { "name": "find_habits", "description": "반복되는 습관 탐지" },
+    { "name": "champion_report", "description": "챔피언별 리포트" },
+    { "name": "matchup_report", "description": "상대 챔피언 매치업 리포트" },
+    { "name": "build_report", "description": "아이템·룬 빌드 리포트" },
+    { "name": "goals", "description": "연습 과제 설정과 진행 판정" },
+    { "name": "journal", "description": "코칭 일지 기록·조회" },
+    { "name": "explain", "description": "지표·기준선 설명" },
+    { "name": "open_dashboard", "description": "로컬 대시보드 열기" }
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "python": ">=3.10"
+    }
+  }
+}

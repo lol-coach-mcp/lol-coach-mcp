@@ -123,6 +123,21 @@ claude mcp add lol-coach -e RIOT_API_KEY=RGAPI-xxxxxxxx -- uvx --from git+https:
 }
 ```
 
+**MCPB 번들** (Claude Desktop 등 MCPB 지원 클라이언트)
+
+`lol-coach-mcp-<버전>.mcpb` 파일을 Claude Desktop에서 열면(더블클릭 또는 설정 → 확장 프로그램으로 끌어다 놓기) 설치 화면이 뜹니다.
+설치할 때 본인의 Riot API 키를 입력합니다. 키는 클라이언트 설정에만 저장되고 번들에는 들어 있지 않습니다.
+데이터 폴더는 선택 항목이며, 비워 두면 기본 위치를 씁니다.
+Python과 의존성은 클라이언트가 uv로 알아서 준비합니다.
+
+번들은 레포 루트의 `manifest.json`으로 직접 만들 수 있습니다.
+
+```bash
+npm install -g @anthropic-ai/mcpb
+mcpb validate manifest.json
+mcpb pack . lol-coach-mcp-1.0.0.mcpb
+```
+
 데이터는 기본 위치에 저장되며, `LOL_COACH_DATA_DIR` 환경변수로 바꿀 수 있습니다.
 `open_dashboard`가 만드는 HTML 리포트는 그 폴더 아래 `reports/`에 저장됩니다.
 
@@ -160,4 +175,4 @@ MIT
 
 ---
 
-lol-coach-mcp is not endorsed by Riot Games and does not reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games and all associated properties are trademarks or registered trademarks of Riot Games, Inc.
+lol-coach-mcp isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games, and all associated properties are trademarks or registered trademarks of Riot Games, Inc.
