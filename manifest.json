@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "lol-coach-mcp",
   "display_name": "LoL Coach (리그 오브 레전드 코칭)",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "내 롤 전적을 Riot 공식 API로 분석해 코칭해 주는 MCP 서버 / Personal League of Legends coaching MCP server (KR server, Korean).",
   "long_description": "Riot 공식 API로 내 경기를 가져와 복기, 최근 폼, 반복 습관, 챔피언·매치업·빌드 리포트, 연습 과제와 코칭 일지, 로컬 대시보드를 제공합니다. 경기 데이터와 설정은 내 PC의 SQLite에만 저장됩니다. 각 사용자가 자신의 Riot API 키를 직접 입력해야 합니다.\n\nlol-coach-mcp isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games, and all associated properties are trademarks or registered trademarks of Riot Games, Inc.",
   "author": {

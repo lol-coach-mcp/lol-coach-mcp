@@ -135,7 +135,7 @@ Python과 의존성은 클라이언트가 uv로 알아서 준비합니다.
 ```bash
 npm install -g @anthropic-ai/mcpb
 mcpb validate manifest.json
-mcpb pack . lol-coach-mcp-0.2.0.mcpb
+mcpb pack . lol-coach-mcp-1.0.0.mcpb
 ```
 
 데이터는 기본 위치에 저장되며, `LOL_COACH_DATA_DIR` 환경변수로 바꿀 수 있습니다.

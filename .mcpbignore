@@ -21,6 +21,7 @@ server/venv/
 *.sqlite3
 *.db
 *.mcpb
+server.json
 CONTRIBUTING.md
 CLAUDE.md
 AGENTS.md
