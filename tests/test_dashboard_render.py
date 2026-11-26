@@ -78,7 +78,7 @@ def test_page_structure_and_escape():
     assert page.startswith("<!DOCTYPE html>")
     assert "<script>" not in page
     assert DISCLAIMER in page
-    assert "prefers-color-scheme: dark" in page
+    assert 'name="color-scheme" content="dark"' in page  # LoL 클라이언트풍 다크 테마
     assert ":root" in page and "viewport" in page
     assert "2026-11-09 12:00 KST" in page
 
