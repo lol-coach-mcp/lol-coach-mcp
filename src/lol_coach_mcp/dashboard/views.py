@@ -7,7 +7,7 @@ from lol_coach_mcp import analysis, champions
 from lol_coach_mcp.models import QUEUE_NAMES
 
 from . import svg
-from .render import SafeHtml, empty_state, kv_list, table
+from .render import SafeHtml, badge_row, empty_state, hex_badge, kv_list, table
 
 MA_WINDOW = 10
 SEASON_CHAMPION_BARS = 8
@@ -75,13 +75,17 @@ def overview_view(
 ) -> list[Section]:
     pairs: list[tuple[str, str]] = [("계정", riot_id)]
     names = QUEUE_NAMES
+    badge_tier = ""
     for e in rank_entries:
         if e.get("queueType") in names:
+            if not badge_tier or e["queueType"] == "RANKED_SOLO_5x5":
+                badge_tier = f"{e.get('tier', '')} {e.get('rank', '')}".strip()
             wins, losses = e.get("wins", 0), e.get("losses", 0)
             pairs.append((names[e["queueType"]], f"{_rank_text(e)} ({wins}승 {losses}패)"))
     if len(pairs) == 1:
         pairs.append(("랭크", "랭크 정보 없음(언랭크이거나 아직 조회하지 못함)"))
-    out = [section("프로필", kv_list(pairs))]
+    badge = hex_badge(badge_tier, "TIER") if badge_tier else hex_badge("UNRANKED", "TIER")
+    out = [section("프로필", badge_row(badge, kv_list(pairs)))]
 
     if not results:
         out.append(section("최근 20판 결과", empty_state(NO_DATA_GUIDE)))
@@ -233,7 +237,10 @@ def match_view(
     objective_events: Sequence[dict] | None,
 ) -> list[Section]:
     """None은 해당 데이터 없음(타임라인 없음 등)."""
-    out = [section("경기 요약", kv_list(summary))]
+    result = str(dict(summary).get("결과", ""))
+    tone = {"승": "win", "패": "loss"}.get(result, "")
+    body = kv_list(summary)
+    out = [section("경기 요약", badge_row(hex_badge(result, "RESULT", tone), body) if result else body)]
     if gold_points:
         out.append(section("15분까지 골드 차", svg.line_chart(
             [{"label": "내 골드 − 라인 상대 골드", "points": [(p["minute"], p["gold_diff"]) for p in gold_points]}],
